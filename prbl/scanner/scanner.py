@@ -30,6 +30,9 @@ class ScanFinding:
     detail: str
     fix: str
     file: str = ""
+    cwe: str = ""
+    owasp_category: str = ""
+    owasp_rank: int = 0
 
 
 @dataclass
@@ -70,6 +73,9 @@ class PrblScanner:
                 detail=match.detail,
                 fix=match.fix,
                 file=file_path,
+                cwe=match.cwe,
+                owasp_category=match.owasp_category,
+                owasp_rank=match.owasp_rank,
             ))
 
         # Package registry checks (requires network)
@@ -90,6 +96,9 @@ class PrblScanner:
                     ),
                     fix=f"Verify the correct package name on {'npmjs.com' if pkg.ecosystem == 'npm' else 'pypi.org'} and update the import.",
                     file=file_path,
+                    cwe="Emerging — no CWE",
+                    owasp_category="A03 — Supply Chain Failures",
+                    owasp_rank=3,
                 ))
 
         # Sort: high severity first, then by line number

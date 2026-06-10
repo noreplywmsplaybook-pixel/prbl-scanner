@@ -18,7 +18,31 @@ class RuleMatch:
     title: str
     detail: str
     fix: str
-    severity: str  # "high" | "medium" | "low"
+    severity: str        # "high" | "medium" | "low"
+    cwe: str = ""        # e.g. "CWE-798"
+    owasp_category: str = ""  # e.g. "A07 — Authentication Failures"
+    owasp_rank: int = 0  # 1–10
+
+
+# ── CWE / OWASP constants per rule ───────────────────────────────────────────
+
+_OWASP: dict[str, tuple[str, str, int]] = {
+    # rule_id → (cwe, owasp_category, owasp_rank)
+    "PRBL-C001": ("CWE-798",    "A07 — Authentication Failures", 7),
+    "PRBL-R001": ("CWE-338",    "A04 — Cryptographic Failures",  4),
+    "PRBL-I001": ("CWE-89",     "A05 — Injection",               5),
+    "PRBL-I002": ("CWE-78",     "A05 — Injection",               5),
+    "PRBL-I003": ("CWE-94/95",  "A05 — Injection",               5),
+    "PRBL-A001": ("CWE-862",    "A01 — Broken Access Control",   1),
+    "PRBL-P001": ("Emerging — no CWE", "A03 — Supply Chain Failures", 3),
+}
+
+
+def _match(rule_id: str, **kwargs) -> RuleMatch:
+    """Construct a RuleMatch with CWE/OWASP fields auto-populated."""
+    cwe, owasp_category, owasp_rank = _OWASP.get(rule_id, ("", "", 0))
+    return RuleMatch(rule_id=rule_id, cwe=cwe, owasp_category=owasp_category,
+                     owasp_rank=owasp_rank, **kwargs)
 
 
 # ── 1. HARDCODED CREDENTIALS ──────────────────────────────────────────────────
@@ -169,7 +193,7 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
                     continue
             if _FALLBACK_SAFE_VALUE.match(fallback_value):
                 continue  # empty / boolean / numeric / algorithm — not a secret
-            findings.append(RuleMatch(
+            findings.append(_match(
                 rule_id="PRBL-C001",
                 vuln_class="hardcoded_credentials",
                 line_number=i,
@@ -222,7 +246,7 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
                 string_values = _STRING_VALUE.findall(line)
                 if any(_CRED_VALIDATION_MSG.search(v) for v in string_values):
                     break
-                findings.append(RuleMatch(
+                findings.append(_match(
                     rule_id="PRBL-C001",
                     vuln_class="hardcoded_credentials",
                     line_number=i,
@@ -305,7 +329,7 @@ def check_weak_randomness(lines: list[str], language: str) -> list[RuleMatch]:
                 fix_js = "Use crypto.randomBytes(32).toString('hex') or crypto.randomUUID()"
                 fix_py = "Use secrets.token_hex(32) or secrets.token_urlsafe(32)"
                 fix = fix_py if language == "python" else fix_js
-                findings.append(RuleMatch(
+                findings.append(_match(
                     rule_id="PRBL-R001",
                     vuln_class="weak_randomness",
                     line_number=i,
@@ -454,7 +478,7 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
                 if not _SQL_CONTEXT_SIGNALS.search(ctx_window):
                     break
                 if _has_taint(window):
-                    findings.append(RuleMatch(
+                    findings.append(_match(
                         rule_id="PRBL-I001",
                         vuln_class="injection",
                         line_number=i,
@@ -477,7 +501,7 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
                 window_end = min(len(lines), i + 5)
                 window = '\n'.join(lines[window_start:window_end])
                 if _has_taint(window):
-                    findings.append(RuleMatch(
+                    findings.append(_match(
                         rule_id="PRBL-I002",
                         vuln_class="injection",
                         line_number=i,
@@ -500,7 +524,7 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
                 window_end = min(len(lines), i + 5)
                 window = '\n'.join(lines[window_start:window_end])
                 if _has_taint(window):
-                    findings.append(RuleMatch(
+                    findings.append(_match(
                         rule_id="PRBL-I003",
                         vuln_class="injection",
                         line_number=i,
@@ -728,7 +752,7 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
 
             if has_sensitive and not has_auth:
                 handler_line_str = lines[handler_line - 1].strip()
-                findings.append(RuleMatch(
+                findings.append(_match(
                     rule_id="PRBL-A001",
                     vuln_class="missing_access_control",
                     line_number=handler_line,
@@ -850,7 +874,7 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
                 )
                 fix = "Add authentication middleware and verify the caller is authorized to access the specific resource (not just logged in)."
 
-            findings.append(RuleMatch(
+            findings.append(_match(
                 rule_id="PRBL-A001",
                 vuln_class="missing_access_control",
                 line_number=i + 1,
