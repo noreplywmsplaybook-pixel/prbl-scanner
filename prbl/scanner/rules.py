@@ -269,10 +269,16 @@ _WEAK_RANDOM_SAFE_CONTEXT = re.compile(
 )
 
 
+# useState exclusion for PRBL-R001: Math.random() inside useState() is a
+# common React pattern for generating a component key to force remounts.
+# This is legitimate UI code, not a security issue.
+# We only suppress if the receiving variable name is not security-sensitive.
+_USESTATE_RANDOM = re.compile(r'useState\s*\(')
+_USESTATE_VAR = re.compile(r'(?:const|let|var)\s+\[(\w+)')
+
+
 def check_weak_randomness(lines: list[str], language: str) -> list[RuleMatch]:
     findings = []
-    # Collect a window of surrounding lines for context
-    full_text = '\n'.join(lines)
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
         if stripped.startswith(('#', '//', '*')):
@@ -281,6 +287,15 @@ def check_weak_randomness(lines: list[str], language: str) -> list[RuleMatch]:
             continue
         for pattern, fn_name in _WEAK_RANDOM_PATTERNS:
             if re.search(pattern, line):
+                # Exclusion: Math.random() / random.* inside useState() is a React
+                # component-key pattern — not security-sensitive unless the state
+                # variable itself has a security name (token, secret, password, etc.)
+                if _USESTATE_RANDOM.search(line):
+                    var_match = _USESTATE_VAR.search(line)
+                    var_name = var_match.group(1) if var_match else ''
+                    if not _WEAK_RANDOM_SECURITY_CONTEXT.search(var_name):
+                        continue  # suppress — React key, not a secret
+
                 # Check surrounding 5 lines for security context
                 window_start = max(0, i - 3)
                 window_end = min(len(lines), i + 2)
@@ -351,9 +366,11 @@ _SQL_INJECTION_PATTERNS = [
     r'(?i)f["\'].*SELECT.*\{',
     r'(?i)f["\'].*INSERT.*\{',
     r'(?i)f["\'].*WHERE.*\{',
-    # Single-line: JS template literal with SQL keyword
-    r'(?i)["\'`].*\$\{.*(SELECT|INSERT|UPDATE|DELETE)',
-    r'(?i)`(SELECT|INSERT|UPDATE|DELETE|WHERE).*\$\{',
+    # Single-line: JS template literal with SQL keyword.
+    # \b word boundaries required — prevents matching substrings like LAST_SELECTED_FEED
+    # (which contains "SELECT") or "UPDATED_AT" (which contains "UPDATE").
+    r'(?i)["\'\`].*\$\{.*\b(SELECT|INSERT|UPDATE|DELETE)\b',
+    r'(?i)`\b(SELECT|INSERT|UPDATE|DELETE|WHERE)\b.*\$\{',
     # Single-line: query/sql variable assigned string + concatenation
     r'(?i)(query|sql)\s*=\s*["\'\`].*\+',
     r'(?i)(query|sql)\s*=\s*f["\']',
@@ -365,6 +382,22 @@ _SQL_INJECTION_PATTERNS = [
     # Multi-line: variable re-assigned by appending user-controlled fragment
     r'(?i)(query|sql|stmt)\s*=\s*(query|sql|stmt)\s*\+',
 ]
+
+# Secondary gate for SQL injection: at least one of these signals must appear in
+# a 10-line window around the flagged line. This prevents false positives on
+# template literals that construct storage keys, paths, or identifiers — those
+# won't have any of these signals nearby.
+_SQL_CONTEXT_SIGNALS = re.compile(
+    r'(?i)('
+    r'\.query\s*\(|\.execute\s*\(|\.raw\s*\('           # common DB driver methods
+    r'|\.prepare\s*\(|\.all\s*\(|\.run\s*\('            # sqlite3 / better-sqlite3
+    r'|\bquery\b|\bexecute\b|\bcursor\b'                 # variable / method names
+    r'|\bpool\b|\bdb\b|\bconn\b|\bconnection\b'          # DB handle names
+    r'|knex|sequelize|prisma|mongoose|typeorm|pg\.|mysql' # ORM/driver names
+    r'|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b'     # SQL keywords (word-bounded)
+    r'|\bFROM\b|\bWHERE\b|\bJOIN\b|\bINTO\b'
+    r')'
+)
 
 _CMD_INJECTION_PATTERNS = [
     r'(?i)(exec|spawn|system|popen|subprocess\.call|subprocess\.run|os\.system)\s*\([^)]*\+',
@@ -412,6 +445,14 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
                 window_start = max(0, i - 5)
                 window_end = min(len(lines), i + 5)
                 window = '\n'.join(lines[window_start:window_end])
+                # Secondary gate: require at least one SQL context signal within
+                # a 10-line window. Template literals that build state-management
+                # keys, cache keys, or path strings have no SQL signals nearby.
+                ctx_start = max(0, i - 5)
+                ctx_end = min(len(lines), i + 5)
+                ctx_window = '\n'.join(lines[ctx_start:ctx_end])
+                if not _SQL_CONTEXT_SIGNALS.search(ctx_window):
+                    break
                 if _has_taint(window):
                     findings.append(RuleMatch(
                         rule_id="PRBL-I001",
