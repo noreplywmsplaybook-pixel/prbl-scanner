@@ -35,6 +35,10 @@ _OWASP: dict[str, tuple[str, str, int]] = {
     "PRBL-I003": ("CWE-94/95",  "A05 — Injection",               5),
     "PRBL-A001": ("CWE-862",    "A01 — Broken Access Control",   1),
     "PRBL-P001": ("Emerging — no CWE", "A03 — Supply Chain Failures", 3),
+    "PRBL-I004": ("CWE-943",    "A05 — Injection",               5),
+    "PRBL-C002": ("CWE-798",    "A07 — Authentication Failures", 7),
+    "PRBL-T001": ("CWE-22",     "A01 — Broken Access Control",   1),
+    "PRBL-S001": ("CWE-918",    "A01 — Broken Access Control",   1),
 }
 
 
@@ -355,6 +359,10 @@ _USER_INPUT_VARS = re.compile(
 )
 
 _FN_SIG = re.compile(r'\bdef\s+\w+\s*\(([^)]+)\)')
+# JS/TS equivalents: function declarations, function expressions, arrow functions
+_FN_SIG_JS = re.compile(
+    r'(?:\bfunction\s*\w*\s*\(([^)]+)\)|(?:const|let|var)\s+\w+\s*=\s*(?:async\s*)?\(([^)]+)\)\s*=>)'
+)
 
 
 def _has_taint(window: str) -> bool:
@@ -378,6 +386,14 @@ def _has_taint(window: str) -> bool:
             name = p.strip().split(':')[0].strip().split('=')[0].strip()
             if name and name != 'self' and name in window:
                 return True
+    js_param = _FN_SIG_JS.search(window)
+    if js_param:
+        params = js_param.group(1) or js_param.group(2) or ''
+        for p in params.split(','):
+            name = p.strip().split(':')[0].strip().split('=')[0].strip()
+            # Skip framework response/next params — only caller-supplied data is taint
+            if name and name not in ('res', 'response', 'next', 'callback', 'cb', 'done', 'err', 'error') and name in window:
+                return True
     return False
 
 _SQL_INJECTION_PATTERNS = [
@@ -393,8 +409,9 @@ _SQL_INJECTION_PATTERNS = [
     # Single-line: JS template literal with SQL keyword.
     # \b word boundaries required — prevents matching substrings like LAST_SELECTED_FEED
     # (which contains "SELECT") or "UPDATED_AT" (which contains "UPDATE").
-    r'(?i)["\'\`].*\$\{.*\b(SELECT|INSERT|UPDATE|DELETE)\b',
-    r'(?i)`\b(SELECT|INSERT|UPDATE|DELETE|WHERE)\b.*\$\{',
+    # (?<!\.) excludes method calls: cipher.update(), model.delete() are not SQL
+    r'(?i)["\'\`].*\$\{.*(?<!\.)\b(SELECT|INSERT|UPDATE|DELETE)\b',
+    r'(?i)`(?<!\.)\b(SELECT|INSERT|UPDATE|DELETE|WHERE)\b.*\$\{',
     # Single-line: query/sql variable assigned string + concatenation
     r'(?i)(query|sql)\s*=\s*["\'\`].*\+',
     r'(?i)(query|sql)\s*=\s*f["\']',
@@ -890,6 +907,252 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
     return findings
 
 
+# ── 5. NOSQL INJECTION (PRBL-I004) ───────────────────────────────────────────
+
+_NOSQL_PATTERNS = [
+    # $where with string concatenation or template interpolation — JS evaluated server-side
+    r'\$where["\']?\s*:\s*["\'`].*(\+|\$\{)',
+    r'\$where["\']?\s*:\s*(req\.|request\.)',
+    # User-controlled object passed straight into a Mongo query operator position:
+    #   User.find(req.body)  /  collection.findOne(req.query)
+    r'\.(find|findOne|findOneAndUpdate|findOneAndDelete|deleteOne|deleteMany|updateOne|updateMany|count|countDocuments)\s*\(\s*(req\.(body|query|params)|request\.(json|args|form))\b',
+    # mapReduce with interpolated JS
+    r'mapReduce\s*\(\s*["\'`].*(\+|\$\{)',
+]
+
+_NOSQL_COMPILED = [re.compile(p) for p in _NOSQL_PATTERNS]
+
+
+def check_nosql_injection(lines: list[str], language: str) -> list[RuleMatch]:
+    findings = []
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith(('#', '//', '*')):
+            continue
+        for pattern in _NOSQL_COMPILED:
+            if pattern.search(line):
+                window = '\n'.join(lines[max(0, i - 5):min(len(lines), i + 5)])
+                if not _has_taint(window):
+                    continue
+                findings.append(_match(
+                    rule_id="PRBL-I004",
+                    vuln_class="injection",
+                    line_number=i,
+                    line=stripped,
+                    title="NoSQL injection: user input in MongoDB query",
+                    detail=(
+                        "User-controlled input flows into a MongoDB query operator. "
+                        "Operator injection ({'$gt': ''} bypasses login checks) and $where "
+                        "string interpolation (arbitrary JS executed inside MongoDB) both "
+                        "let an attacker read or modify data they shouldn't reach."
+                    ),
+                    fix=(
+                        "Never pass req.body/req.query objects directly into a query. "
+                        "Extract and validate each field explicitly (e.g. {email: String(req.body.email)}), "
+                        "and avoid $where entirely — express the condition with standard query operators."
+                    ),
+                    severity="high",
+                ))
+                break
+    return findings
+
+
+# ── 6. HARDCODED SESSION/COOKIE SECRET (PRBL-C002) ───────────────────────────
+
+# secret: '...' inside session()/cookieParser()/jwt.sign() config. The generic
+# PRBL-C001 assignment pattern misses object-literal syntax (colon, not equals).
+# Matches secret:, cookieSecret:, sessionSecret:, jwt_secret:, etc.
+_SESSION_SECRET = re.compile(
+    r'''(?i)\b[a-z_]*secret\s*:\s*["'][^"']{4,}["']''',
+)
+_COOKIE_PARSER_SECRET = re.compile(
+    r'''cookieParser\s*\(\s*["'][^"']{4,}["']\s*\)''',
+)
+# Flask/Django style: app.secret_key = '...' / SECRET_KEY = '...'
+_PY_SECRET_KEY = re.compile(
+    r'''(?i)(secret_key)\s*=\s*["'][^"']{4,}["']''',
+)
+# Context that makes the session-secret window relevant
+_SESSION_CONTEXT = re.compile(
+    r'(?i)(session\s*\(|express-session|cookie-session|cookieParser|jwt\.sign|jsonwebtoken|app\.secret_key|SECRET_KEY|'
+    r'cookie_?secret|session_?secret|jwt_?secret|token_?secret|signing_?secret)',
+)
+
+
+def check_session_secret(lines: list[str], language: str) -> list[RuleMatch]:
+    findings = []
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith(('#', '//', '*')):
+            continue
+        if _CRED_SAFE_CONTEXT.search(line):
+            continue  # process.env / os.environ — secret comes from config
+        if _CRED_SAFE_VARNAME.search(line):
+            continue
+        hit = (
+            _SESSION_SECRET.search(line)
+            or _COOKIE_PARSER_SECRET.search(line)
+            or (language == "python" and _PY_SECRET_KEY.search(line))
+        )
+        if not hit:
+            continue
+        # Require session/JWT context on the line or in the 5 lines above —
+        # avoids flagging unrelated object fields that happen to be named secret
+        window = '\n'.join(lines[max(0, i - 5):i + 1])
+        if not _SESSION_CONTEXT.search(window):
+            continue
+        # Skip obvious placeholder values
+        value_m = _STRING_VALUE.search(hit.group(0))
+        if value_m and _FALLBACK_SAFE_VALUE.match(value_m.group(1)):
+            continue
+        findings.append(_match(
+            rule_id="PRBL-C002",
+            vuln_class="hardcoded_credentials",
+            line_number=i,
+            line=stripped,
+            title="Hardcoded session/signing secret",
+            detail=(
+                "The session or token-signing secret is a literal string in source code. "
+                "Anyone with repo access can forge valid session cookies or JWTs for any "
+                "user — full account takeover with no other vulnerability required. "
+                "AI-generated Express and Flask boilerplate ships this constantly."
+            ),
+            fix=(
+                "Load the secret from an environment variable and fail fast if missing: "
+                "`secret: process.env.SESSION_SECRET` / `app.secret_key = os.environ['SECRET_KEY']`. "
+                "Rotate the leaked value — it is compromised the moment it was committed."
+            ),
+            severity="high",
+        ))
+    return findings
+
+
+# ── 7. PATH TRAVERSAL (PRBL-T001) ────────────────────────────────────────────
+
+_PATH_SINKS = re.compile(
+    r'(?i)\b(sendFile|createReadStream|createWriteStream|readFile|readFileSync|'
+    r'writeFile|writeFileSync|unlink|unlinkSync|open|send_file|send_from_directory|'
+    r'FileResponse)\s*\(',
+)
+# User input used in the sink argument: concatenation, template literal, f-string,
+# os.path.join with a request value
+_PATH_TAINT_ON_LINE = re.compile(
+    r'(req\.(params|query|body)|request\.(args|form|values|json)|'
+    r'\$\{|f["\']|\+\s*\w|os\.path\.join)',
+)
+# Sanitization signals — basename() or a traversal check nearby means handled
+_PATH_SANITIZED = re.compile(
+    r'(?i)(basename|path\.resolve.*startsWith|normalize.*startsWith|'
+    r'\.\.[\'"/\\]?\s*(in|includes)|includes\s*\(\s*["\']\.\.|secure_filename|safe_join)',
+)
+
+
+def check_path_traversal(lines: list[str], language: str) -> list[RuleMatch]:
+    findings = []
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith(('#', '//', '*')):
+            continue
+        if not _PATH_SINKS.search(line):
+            continue
+        if not _PATH_TAINT_ON_LINE.search(line):
+            continue
+        window = '\n'.join(lines[max(0, i - 6):min(len(lines), i + 6)])
+        if not _has_taint(window):
+            continue
+        if _PATH_SANITIZED.search(window):
+            continue
+        findings.append(_match(
+            rule_id="PRBL-T001",
+            vuln_class="path_traversal",
+            line_number=i,
+            line=stripped,
+            title="Path traversal: user input in filesystem path",
+            detail=(
+                "A user-controlled value is used to build a filesystem path. "
+                "Input like '../../etc/passwd' or '..\\\\..\\\\.env' escapes the intended "
+                "directory and reads (or overwrites) arbitrary files — including your "
+                ".env file with every secret in it."
+            ),
+            fix=(
+                "Resolve the final path and verify it stays inside the allowed directory: "
+                "`const p = path.resolve(base, name); if (!p.startsWith(base + path.sep)) throw ...` "
+                "— or use path.basename()/secure_filename() to strip directory components."
+            ),
+            severity="high",
+        ))
+    return findings
+
+
+# ── 8. SSRF (PRBL-S001) ──────────────────────────────────────────────────────
+
+# Outbound request call where the URL argument starts with user input or
+# interpolates it at the start of the URL (scheme/host position).
+_SSRF_SINKS = re.compile(
+    r'(?i)\b(fetch|axios(\.(get|post|put|delete|request))?|got|'
+    r'requests\.(get|post|put|delete|request)|urllib\.request\.urlopen|'
+    r'httpx\.(get|post)|http\.get)\s*\(',
+)
+# URL argument is tainted in host position: variable-only arg, or template/f-string
+# starting with the interpolation (not a fixed https://host/ prefix)
+_SSRF_TAINTED_URL = re.compile(
+    r'''\(\s*(?:'''
+    r'''(req\.(query|body|params)\.\w+|request\.(args|form|json)(\.get)?\s*[\(\[])'''  # direct request value
+    r'''|`\$\{'''                                  # template literal starting with interpolation
+    r'''|f["']\{'''                                # f-string starting with interpolation
+    r''')''',
+)
+# A fixed-host URL with interpolated path (`https://api.x.com/${id}`) is not SSRF
+_SSRF_SAFE_PREFIX = re.compile(
+    r'''\(\s*(["'`]https?://[a-z0-9.-]+|["']/)''',
+    re.IGNORECASE,
+)
+
+
+def check_ssrf(lines: list[str], language: str) -> list[RuleMatch]:
+    findings = []
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith(('#', '//', '*')):
+            continue
+        if not _SSRF_SINKS.search(line):
+            continue
+        if _SSRF_SAFE_PREFIX.search(line):
+            continue
+        window = '\n'.join(lines[max(0, i - 5):min(len(lines), i + 5)])
+        if not _SSRF_TAINTED_URL.search(line):
+            # Variable URL: only flag if a request value is assigned to it nearby
+            #   const url = req.query.url; ... fetch(url)
+            var_arg = re.search(r'\(\s*(\w+)\s*[,)]', line)
+            if not var_arg:
+                continue
+            assign = re.compile(
+                rf'{re.escape(var_arg.group(1))}\s*=\s*.*(req\.(query|body|params)|request\.(args|form|json))'
+            )
+            if not assign.search(window):
+                continue
+        findings.append(_match(
+            rule_id="PRBL-S001",
+            vuln_class="ssrf",
+            line_number=i,
+            line=stripped,
+            title="SSRF: user-controlled URL in server-side request",
+            detail=(
+                "The server makes an HTTP request to a URL the user controls. "
+                "An attacker can point it at internal services — cloud metadata "
+                "(169.254.169.254 → credentials), localhost admin panels, or your "
+                "database — using your server as a proxy past the firewall."
+            ),
+            fix=(
+                "Validate the URL against an allowlist of permitted hosts before fetching. "
+                "Reject private/link-local IP ranges (127.0.0.0/8, 10.0.0.0/8, 169.254.0.0/16, "
+                "172.16.0.0/12, 192.168.0.0/16) after DNS resolution, not before."
+            ),
+            severity="high",
+        ))
+    return findings
+
+
 # ── Test-file detection ───────────────────────────────────────────────────────
 
 # Directory components that mark a file as test scaffolding
@@ -949,6 +1212,13 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
 
     findings += check_weak_randomness(lines, language)
     findings += check_injection(lines, language)
+    findings += check_nosql_injection(lines, language)
+    findings += check_path_traversal(lines, language)
+    findings += check_ssrf(lines, language)
+
+    # PRBL-C002: session secrets follow the same test-file policy as PRBL-C001
+    if not is_test:
+        findings += check_session_secret(lines, language)
 
     # PRBL-A001: skip entirely for test/spec files — test scaffolding routes
     # are not production endpoints and generate noise, not signal.
