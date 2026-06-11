@@ -120,6 +120,17 @@ and full-stack codebases. 6.25% false positive rate.
 Found a new AI vulnerability pattern? Open a PR.
 Rule format is documented in CONTRIBUTING.md.
 
+**Every new rule must pass the validation pipeline before merging:**
+
+1. Synthetic test suite — minimum 10 cases (true positives and false positives)
+2. Batch stress test — minimum 20 real public codebases
+3. False positive rate confirmed under 10% on human-written code
+4. Validated against at least one enterprise-scale codebase (1000+ files)
+
+Rules that skip this pipeline will be reverted. PRBL-S001 (SSRF) was removed
+after producing a 100% false positive rate on the first production codebase it
+touched — it was added without completing any of the four steps above.
+
 ## License
 
 MIT

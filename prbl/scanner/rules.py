@@ -1,3 +1,11 @@
+# RULE VALIDATION REQUIREMENT
+# Every new rule added to this scanner must pass:
+# 1. A synthetic test suite (minimum 10 cases — true positives and false positives)
+# 2. A batch stress test against minimum 20 real codebases
+# 3. False positive rate confirmed under 10% on human-written code
+# 4. Validated against at least one enterprise-scale codebase (1000+ files)
+# No new rule ships without completing all four steps.
+
 """
 Static pattern rules for the five Phase 2 vulnerability classes.
 All rules are regex-based — no network calls, runs fully offline.
