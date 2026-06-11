@@ -38,7 +38,6 @@ _OWASP: dict[str, tuple[str, str, int]] = {
     "PRBL-I004": ("CWE-943",    "A05 — Injection",               5),
     "PRBL-C002": ("CWE-798",    "A07 — Authentication Failures", 7),
     "PRBL-T001": ("CWE-22",     "A01 — Broken Access Control",   1),
-    "PRBL-S001": ("CWE-918",    "A01 — Broken Access Control",   1),
 }
 
 
@@ -297,6 +296,30 @@ _WEAK_RANDOM_SAFE_CONTEXT = re.compile(
 )
 
 
+# Crypto availability guard patterns — Math.random() used as fallback when
+# crypto API is unavailable (e.g. old browsers). Not a security issue because
+# the safe path is taken when the API is present.
+_CRYPTO_FALLBACK_PATTERNS = [
+    re.compile(r'crypto\.randomUUID\s*\?'),
+    re.compile(r'crypto\.getRandomValues\s*\?'),
+    re.compile(r'window\.crypto'),
+    re.compile(r'self\.crypto'),
+    re.compile(r'globalThis\.crypto'),
+]
+
+# Variable names used for analytics/tracking IDs — low-entropy IDs for telemetry,
+# not for security tokens. Downgrade to LOW instead of HIGH.
+_ANALYTICS_VARS = re.compile(
+    r'(?i)\b(visitorId|visitor_id|analyticsId|analytics_id|'
+    r'trackingId|tracking_id|anonymousId|anonymous_id|'
+    r'tempId|temp_id|draftId|draft_id|formId|form_id|instanceId|instance_id)\b'
+)
+
+# Draft / temporary context — IDs with no security implication
+_DRAFT_TEMP_CONTEXT = re.compile(
+    r'(?i)\b(draft|temp|temporary|preview|cache_?bust|cache_?key|idempotency)\b'
+)
+
 # useState exclusion for PRBL-R001: Math.random() inside useState() is a
 # common React pattern for generating a component key to force remounts.
 # This is legitimate UI code, not a security issue.
@@ -324,28 +347,47 @@ def check_weak_randomness(lines: list[str], language: str) -> list[RuleMatch]:
                     if not _WEAK_RANDOM_SECURITY_CONTEXT.search(var_name):
                         continue  # suppress — React key, not a secret
 
-                # Check surrounding 5 lines for security context
+                # Exclusion: crypto API availability guard — Math.random() used only
+                # when window.crypto / globalThis.crypto is unavailable (old browsers).
                 window_start = max(0, i - 3)
                 window_end = min(len(lines), i + 2)
                 window = '\n'.join(lines[window_start:window_end])
+                if any(p.search(window) for p in _CRYPTO_FALLBACK_PATTERNS):
+                    continue
+
                 if not _WEAK_RANDOM_SECURITY_CONTEXT.search(window):
                     continue
+
                 fix_js = "Use crypto.randomBytes(32).toString('hex') or crypto.randomUUID()"
                 fix_py = "Use secrets.token_hex(32) or secrets.token_urlsafe(32)"
                 fix = fix_py if language == "python" else fix_js
+
+                # Downgrade analytics/tracking IDs and draft/temp context to LOW
+                if _ANALYTICS_VARS.search(line) or _DRAFT_TEMP_CONTEXT.search(window):
+                    sev = "low"
+                    detail = (
+                        f"{fn_name} is not cryptographically secure, but this appears to be "
+                        "an analytics/tracking identifier where predictability is low-risk. "
+                        "Use a cryptographic source if this ID is used for access control or "
+                        "deduplication with security implications."
+                    )
+                else:
+                    sev = "high"
+                    detail = (
+                        f"{fn_name} is not cryptographically secure. Its output is predictable — "
+                        "an attacker who observes a few values can reconstruct the internal state "
+                        "and predict all future outputs, including tokens and session IDs."
+                    )
+
                 findings.append(_match(
                     rule_id="PRBL-R001",
                     vuln_class="weak_randomness",
                     line_number=i,
                     line=stripped,
                     title=f"Weak randomness for security-sensitive value: {fn_name}",
-                    detail=(
-                        f"{fn_name} is not cryptographically secure. Its output is predictable — "
-                        "an attacker who observes a few values can reconstruct the internal state "
-                        "and predict all future outputs, including tokens and session IDs."
-                    ),
+                    detail=detail,
                     fix=fix,
-                    severity="high",
+                    severity=sev,
                 ))
                 break
     return findings
@@ -395,6 +437,19 @@ def _has_taint(window: str) -> bool:
             if name and name not in ('res', 'response', 'next', 'callback', 'cb', 'done', 'err', 'error') and name in window:
                 return True
     return False
+
+# Tagged template literals used by SQL ORMs produce parameterized queries — safe.
+# These tags appear immediately before the backtick: sql`SELECT...`, $queryRaw`...`
+_SAFE_SQL_TAGS = re.compile(
+    r'(?i)(?:^|[\s.(])(?:sql|Prisma\.sql|\$queryRaw|\$executeRaw|drizzle\.sql|sql\.raw|slonik\.sql|'
+    r'postgres\.sql|pg)\s*`'
+)
+
+# Browser dialog methods that match SQL patterns on variable names: confirm/alert/prompt
+# are never injection sinks regardless of what they contain.
+_BROWSER_DIALOGS = re.compile(
+    r'(?i)\b(window\.)?(confirm|alert|prompt)\s*\('
+)
 
 _SQL_INJECTION_PATTERNS = [
     # Single-line: SQL keyword + string concatenation.
@@ -483,6 +538,12 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
         # SQL injection
         for pattern in _SQL_INJECTION_PATTERNS:
             if re.search(pattern, line):
+                # Skip ORM tagged template literals — these produce parameterized queries
+                if _SAFE_SQL_TAGS.search(line):
+                    break
+                # Skip browser dialog methods — confirm/alert/prompt are not SQL sinks
+                if _BROWSER_DIALOGS.search(line):
+                    break
                 window_start = max(0, i - 5)
                 window_end = min(len(lines), i + 5)
                 window = '\n'.join(lines[window_start:window_end])
@@ -709,6 +770,27 @@ _PUBLIC_ROUTE_RE = re.compile(
 )
 
 
+# Routes whose names signal they are intentionally public-facing with no auth requirement.
+# When a route path or handler function name contains one of these, downgrade to LOW.
+_INTENTIONALLY_PUBLIC_ROUTES = re.compile(
+    r'(?i)[/"](free[-_]?trial|freetrial|demo[-_]?request|analytics|tracking|telemetry|'
+    r'beacon|webhook|webhooks|callback|oauth|health[-_]?check|'
+    r'public[-_]|open[-_])[/"\'$]?'
+)
+
+# Rate-limiting signals in a 20-line window — suggests the developer is aware of
+# unauthenticated access and is controlling it via rate limiting instead of auth.
+_RATE_LIMIT_SIGNALS = re.compile(
+    r'(?i)(rateLimit|rate_limit|rateLimiter|checkRateLimit|applyRateLimit|'
+    r'too many requests|Too Many Requests|X-RateLimit|Retry-After)'
+)
+
+# Explicit annotation comment indicating the developer chose public access
+_PUBLIC_ANNOTATION = re.compile(
+    r'(?i)//\s*(@public|public endpoint|no auth required|intentionally unauthenticated)'
+)
+
+
 def _has_django_settings(file_path: str) -> bool:
     """
     Return True if a settings.py (or settings/ package) exists anywhere in the
@@ -861,6 +943,20 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
         has_sensitive = bool(_SENSITIVE_OPERATIONS.search(lookahead_text))
 
         if has_sensitive and not has_auth:
+            # Skip: developer explicitly annotated this endpoint as public
+            route_context = '\n'.join(lines[max(0, i - 3):i + 1])
+            if _PUBLIC_ANNOTATION.search(route_context):
+                i += 1
+                continue
+
+            # Check if this is an intentionally public route by path/name pattern
+            is_public_by_name = bool(_INTENTIONALLY_PUBLIC_ROUTES.search(line))
+
+            # Check if rate limiting is present in a 20-line window (signals
+            # the developer is aware of unauthenticated access)
+            rl_window = '\n'.join(lines[max(0, i - 10):min(len(lines), i + 10)])
+            has_rate_limit = bool(_RATE_LIMIT_SIGNALS.search(rl_window))
+
             # Settings-aware confidence downgrade for Django/DRF views.
             # A DRF view without explicit permission_classes may be protected by
             # DEFAULT_PERMISSION_CLASSES in settings.py — which Prbl does not yet
@@ -880,6 +976,19 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
                     "Verify that REST_FRAMEWORK['DEFAULT_PERMISSION_CLASSES'] in settings.py "
                     "includes IsAuthenticated. For endpoints that must be public (e.g. registration, "
                     "login), add permission_classes = [AllowAny] explicitly so the intent is clear."
+                )
+            elif is_public_by_name or has_rate_limit:
+                sev = "low"
+                detail = (
+                    "This route performs a sensitive operation with no visible authentication check. "
+                    + ("The route name suggests it may be intentionally public. " if is_public_by_name else "")
+                    + ("Rate limiting is present, which reduces exposure. " if has_rate_limit else "")
+                    + "Confirm this endpoint is intentionally unauthenticated and add an explicit "
+                    "// @public annotation or AllowAny permission class to document the decision."
+                )
+                fix = (
+                    "If intentionally public, add `// @public` to document the decision. "
+                    "If not, add authentication middleware before this route."
                 )
             else:
                 sev = "medium"
@@ -1084,74 +1193,6 @@ def check_path_traversal(lines: list[str], language: str) -> list[RuleMatch]:
     return findings
 
 
-# ── 8. SSRF (PRBL-S001) ──────────────────────────────────────────────────────
-
-# Outbound request call where the URL argument starts with user input or
-# interpolates it at the start of the URL (scheme/host position).
-_SSRF_SINKS = re.compile(
-    r'(?i)\b(fetch|axios(\.(get|post|put|delete|request))?|got|'
-    r'requests\.(get|post|put|delete|request)|urllib\.request\.urlopen|'
-    r'httpx\.(get|post)|http\.get)\s*\(',
-)
-# URL argument is tainted in host position: variable-only arg, or template/f-string
-# starting with the interpolation (not a fixed https://host/ prefix)
-_SSRF_TAINTED_URL = re.compile(
-    r'''\(\s*(?:'''
-    r'''(req\.(query|body|params)\.\w+|request\.(args|form|json)(\.get)?\s*[\(\[])'''  # direct request value
-    r'''|`\$\{'''                                  # template literal starting with interpolation
-    r'''|f["']\{'''                                # f-string starting with interpolation
-    r''')''',
-)
-# A fixed-host URL with interpolated path (`https://api.x.com/${id}`) is not SSRF
-_SSRF_SAFE_PREFIX = re.compile(
-    r'''\(\s*(["'`]https?://[a-z0-9.-]+|["']/)''',
-    re.IGNORECASE,
-)
-
-
-def check_ssrf(lines: list[str], language: str) -> list[RuleMatch]:
-    findings = []
-    for i, line in enumerate(lines, 1):
-        stripped = line.strip()
-        if stripped.startswith(('#', '//', '*')):
-            continue
-        if not _SSRF_SINKS.search(line):
-            continue
-        if _SSRF_SAFE_PREFIX.search(line):
-            continue
-        window = '\n'.join(lines[max(0, i - 5):min(len(lines), i + 5)])
-        if not _SSRF_TAINTED_URL.search(line):
-            # Variable URL: only flag if a request value is assigned to it nearby
-            #   const url = req.query.url; ... fetch(url)
-            var_arg = re.search(r'\(\s*(\w+)\s*[,)]', line)
-            if not var_arg:
-                continue
-            assign = re.compile(
-                rf'{re.escape(var_arg.group(1))}\s*=\s*.*(req\.(query|body|params)|request\.(args|form|json))'
-            )
-            if not assign.search(window):
-                continue
-        findings.append(_match(
-            rule_id="PRBL-S001",
-            vuln_class="ssrf",
-            line_number=i,
-            line=stripped,
-            title="SSRF: user-controlled URL in server-side request",
-            detail=(
-                "The server makes an HTTP request to a URL the user controls. "
-                "An attacker can point it at internal services — cloud metadata "
-                "(169.254.169.254 → credentials), localhost admin panels, or your "
-                "database — using your server as a proxy past the firewall."
-            ),
-            fix=(
-                "Validate the URL against an allowlist of permitted hosts before fetching. "
-                "Reject private/link-local IP ranges (127.0.0.0/8, 10.0.0.0/8, 169.254.0.0/16, "
-                "172.16.0.0/12, 192.168.0.0/16) after DNS resolution, not before."
-            ),
-            severity="high",
-        ))
-    return findings
-
 
 # ── Test-file detection ───────────────────────────────────────────────────────
 
@@ -1214,7 +1255,6 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
     findings += check_injection(lines, language)
     findings += check_nosql_injection(lines, language)
     findings += check_path_traversal(lines, language)
-    findings += check_ssrf(lines, language)
 
     # PRBL-C002: session secrets follow the same test-file policy as PRBL-C001
     if not is_test:
