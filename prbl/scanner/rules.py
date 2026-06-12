@@ -282,6 +282,11 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
 _WEAK_RANDOM_PATTERNS = [
     # JavaScript / TypeScript
     (r'Math\.random\(\)', "Math.random()"),
+    # UUID v1 — time-based, includes MAC address; predictable and leaks host identity.
+    # v4 (random) is the correct choice for tokens and session IDs.
+    (r'(?i)\buuid\.v1\s*\(\)', "uuid.v1() (time-based UUID)"),
+    (r"(?i)['\"]v1['\"].*uuidv?1|uuidv?1.*['\"]v1['\"]", "uuidv1() (time-based UUID)"),
+    (r'\buuidv1\s*\(\)', "uuidv1() (time-based UUID)"),
     # Python
     (r'\brandom\.random\(\)', "random.random()"),
     (r'\brandom\.randint\(', "random.randint()"),
@@ -469,6 +474,12 @@ _SQL_INJECTION_PATTERNS = [
     r'(?i)f["\'].*SELECT.*\{',
     r'(?i)f["\'].*INSERT.*\{',
     r'(?i)f["\'].*WHERE.*\{',
+    # Single-line: Python %-string formatting with SQL keyword
+    # Catches: cursor.execute("SELECT * FROM users WHERE id = %s" % user_id)
+    # and:     cursor.execute("SELECT ... WHERE name = '%s'" % name)
+    r'(?i)["\'].*SELECT.*["\']\s*%\s',
+    r'(?i)["\'].*INSERT.*["\']\s*%\s',
+    r'(?i)["\'].*WHERE.*["\']\s*%\s',
     # Single-line: JS template literal with SQL keyword.
     # \b word boundaries required — prevents matching substrings like LAST_SELECTED_FEED
     # (which contains "SELECT") or "UPDATED_AT" (which contains "UPDATE").
@@ -1129,13 +1140,14 @@ _SESSION_SECRET = re.compile(
 _COOKIE_PARSER_SECRET = re.compile(
     r'''cookieParser\s*\(\s*["'][^"']{4,}["']\s*\)''',
 )
-# Flask/Django style: app.secret_key = '...' / SECRET_KEY = '...'
+# Flask/Django style: app.secret_key = '...' / SECRET_KEY = '...' / SECRET_KEY_BASE = '...'
 _PY_SECRET_KEY = re.compile(
-    r'''(?i)(secret_key)\s*=\s*["'][^"']{4,}["']''',
+    r'''(?i)(secret_key(?:_base)?)\s*=\s*["'][^"']{4,}["']''',
 )
 # Context that makes the session-secret window relevant
 _SESSION_CONTEXT = re.compile(
     r'(?i)(session\s*\(|express-session|cookie-session|cookieParser|jwt\.sign|jsonwebtoken|app\.secret_key|SECRET_KEY|'
+    r'DJANGO_SECRET_KEY|SECRET_KEY_BASE|'
     r'cookie_?secret|session_?secret|jwt_?secret|token_?secret|signing_?secret)',
 )
 
@@ -1193,7 +1205,7 @@ def check_session_secret(lines: list[str], language: str) -> list[RuleMatch]:
 _PATH_SINKS = re.compile(
     r'(?i)\b(sendFile|createReadStream|createWriteStream|readFile|readFileSync|'
     r'writeFile|writeFileSync|unlink|unlinkSync|open|send_file|send_from_directory|'
-    r'FileResponse)\s*\(',
+    r'FileResponse|read_text|read_bytes|write_text|write_bytes)\s*\(',
 )
 # User input used in the sink argument: concatenation, template literal, f-string,
 # os.path.join with a request value

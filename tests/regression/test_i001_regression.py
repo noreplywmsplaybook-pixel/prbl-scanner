@@ -1,6 +1,9 @@
 """
 PRBL-I001 regression suite — SQL Injection.
 
+Also covers:
+  - Python %-string formatting SQL injection (psycopg2 / legacy pattern)
+
 Covers every false-positive fix discovered across production stress testing:
   - Mongoose .select('+password') was flagged as SQL injection
   - mongoose removed from SQL context signals
@@ -201,3 +204,42 @@ def test_orm_method_calls_not_sql_injection():
         findings = run(code)
         i001 = [f for f in findings if f['rule_id'] == 'PRBL-I001']
         assert not i001, f"PRBL-I001 must not fire on ORM method call: {code!r}. Got: {i001}"
+
+
+# ── EASY FIX: Python %-string formatting SQL injection ────────────────────────
+
+def test_python_percent_format_sql_injection_fires():
+    """True positive: Python %-format SQL injection (psycopg2 legacy pattern) fires I001."""
+    code = '''
+def get_user(username):
+    query = "SELECT * FROM users WHERE name = '%s'" % username
+    cursor.execute(query)
+'''
+    findings = run(code, language='python', file_path='db.py')
+    assert any(f['rule_id'] == 'PRBL-I001' for f in findings), \
+        "PRBL-I001 must fire on Python %-format SQL injection"
+
+
+def test_python_percent_format_select_fires():
+    """True positive: Python %-format with SELECT fires I001."""
+    code = '''
+def search(term):
+    sql = "SELECT id, name FROM products WHERE category = '%s'" % term
+    return cursor.execute(sql)
+'''
+    findings = run(code, language='python', file_path='products.py')
+    assert any(f['rule_id'] == 'PRBL-I001' for f in findings), \
+        "PRBL-I001 must fire on %-format SELECT injection"
+
+
+def test_python_percent_format_safe_static_not_flagged():
+    """True negative: Python %-format with a static string (no taint) must not fire."""
+    code = '''
+TABLE = "users"
+query = "SELECT * FROM %s" % TABLE
+cursor.execute(query)
+'''
+    findings = run(code, language='python', file_path='db.py')
+    i001 = [f for f in findings if f['rule_id'] == 'PRBL-I001']
+    assert not i001, \
+        f"PRBL-I001 must not fire on %-format with a static constant (no user taint). Got: {i001}"

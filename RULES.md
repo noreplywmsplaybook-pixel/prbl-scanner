@@ -84,6 +84,16 @@ Files in demo, animation, or marketing paths have PRBL-C001 findings downgraded 
 
 Affected paths (case-insensitive): `remotion/`, files named `HeroAnimation`, `HeroScanner`, `HeroPlayer`, `/animations/`, `/demo/`, `/marketing/`, `/examples/`, `app/page.tsx` (landing page root), `pages/index.*`.
 
+#### Known Limitations
+
+**Covered:** Python source files (`.py`) and JavaScript/TypeScript source files (`.js`, `.ts`, `.jsx`, `.tsx`). The six generic assignment patterns, all well-known credential formats (Stripe, AWS, GitHub), and the JS/Python env-var fallback antipattern.
+
+**Not covered:**
+- Config files (YAML, JSON, TOML, `.env`) — the scanner receives source code, not config; secrets in `config/database.yml` or `docker-compose.yml` are out of scope. (OUT OF SCOPE for this scanner; a dedicated secrets-in-config tool is the right instrument.)
+- Go `const` declarations (`const apiKey = "sk_live_..."`) and Rust `static` bindings (`static API_KEY: &str = "..."`) — the scanner has no Go or Rust language mode. (OUT OF SCOPE — different language.)
+- Ruby constants (`API_KEY = "sk_live_..."`) — same language-scope gap. (OUT OF SCOPE.)
+- The generic assignment pattern requires `=` syntax; it will miss Python dict-literal secrets like `config = {"password": "hunter2"}` unless the dict key matches a recognized name near an `=`. (MEDIUM — dict-literal pattern would need a new sub-pattern.)
+
 ---
 
 ### PRBL-C002 — Hardcoded Session or Signing Secret
@@ -115,6 +125,16 @@ Anyone with read access to the repository can forge valid session cookies or JWT
 
 **Severity:** HIGH.
 
+#### Known Limitations
+
+**Covered:** Express-session `secret:` object-literal syntax, `cookieParser()` argument, Flask/Django `app.secret_key` and `SECRET_KEY` / `SECRET_KEY_BASE` assignments, `jwt.sign()` literal arguments, and the `DJANGO_SECRET_KEY` env var name. Requires session/JWT context within 5 lines.
+
+**Not covered:**
+- Rails `secret_key_base` in `config/secrets.yml` or `credentials.yml.enc` — Ruby is out of scope, and these are config files rather than source code. (OUT OF SCOPE.)
+- ASP.NET `DataProtection` keys and `IDataProtector` configuration — C# is out of scope. (OUT OF SCOPE.)
+- Go `gorilla/sessions` `sessions.NewCookieStore([]byte("secret"))` — Go is out of scope. (OUT OF SCOPE.)
+- `jsonwebtoken` `sign()` calls where the secret is passed as a variable rather than a literal (e.g. `jwt.sign(payload, secretVar)` where `secretVar` was assigned the literal earlier in the file) — multi-line data-flow tracking is beyond the current regex model. (MEDIUM — would require cross-line variable tracking.)
+
 ---
 
 ### PRBL-R001 — Weak Randomness
@@ -141,6 +161,17 @@ These functions are seeded from predictable system state. An attacker who observ
 - Draft or temporary context (`draft`, `temp`, `preview`, `cache_bust`) nearby.
 
 **Severity:** HIGH (or LOW for analytics/tracking IDs).
+
+#### Known Limitations
+
+**Covered:** `Math.random()` (JS/TS) and all six `random` module functions (Python) — when used near security-sensitive variable names. Also now covers `uuid.v1()` / `uuidv1()` (time-based, predictable UUID).
+
+**Not covered:**
+- Go's `math/rand` vs `crypto/rand` distinction — Go is out of scope. (OUT OF SCOPE.)
+- Ruby's `rand` and `Kernel.rand` — Ruby is out of scope. (OUT OF SCOPE.)
+- `nanoid` misuse: `nanoid` itself is cryptographically secure (uses `crypto.getRandomValues`); there is no common misuse pattern worth detecting here. Not a gap.
+- UUID v1 detection relies on the symbol name containing `v1` or `uuidv1` — if a developer aliases it as `const id = require('uuid').v1` and stores to an unrelated variable name, the context check (security word nearby) is the only gate. This is the intended behavior; flagging all UUID v1 calls regardless of context would produce too many false positives for timestamp-only use cases. (Acceptable tradeoff.)
+- Python's `secrets` module and `os.urandom` are already safe and correctly not flagged; no gap there.
 
 ---
 
@@ -183,6 +214,17 @@ f"INSERT INTO logs WHERE {condition}"
 
 **Severity:** HIGH.
 
+#### Known Limitations
+
+**Covered:** String concatenation and template-literal interpolation into SQL queries, Python f-string SQL, Python `%`-format SQL (psycopg2 legacy pattern), multi-line query building with `+=`. Understands knex, sequelize, prisma, typeorm, pg, mysql as safe-context signals. Tagged template literals (`sql\`...\``, `$queryRaw\`...\``, `drizzle.sql\`...\``) are correctly excluded as parameterized.
+
+**Not covered:**
+- `psycopg2` `cursor.execute()` with `.format()` string method: `"SELECT * FROM users WHERE id = {}".format(uid)` — the `{}` placeholder is not yet a detected pattern. (MEDIUM — straightforward pattern addition.)
+- SQLAlchemy Core `text()` with string concatenation: `text("SELECT * FROM users WHERE id = " + uid)` — the `text()` call is not in the sink list. (MEDIUM — add `text(` as a sink with SQL context signal.)
+- Go's `database/sql` `db.Query("SELECT..." + input)` — Go is out of scope. (OUT OF SCOPE.)
+- Rails `ActiveRecord.where("name = '#{params[:name]}'")` with Ruby interpolation — Ruby is out of scope. (OUT OF SCOPE.)
+- Raw `sqlite3` Python module: `conn.execute("SELECT..." + val)` — `conn` is not in the SQL context signals list, but `cursor` is, and the taint+SQL-keyword patterns should still fire if the variable is named `cursor` or `query`. (Acceptable tradeoff — renaming to non-standard variable is an edge case.)
+
 ---
 
 ### PRBL-I002 — Command Injection
@@ -209,6 +251,16 @@ subprocess.call(user_input + " --flag")
 Uses the same taint-source logic as PRBL-I001.
 
 **Severity:** HIGH.
+
+#### Known Limitations
+
+**Covered:** `exec`, `spawn`, `system`, `popen`, `subprocess.call`, `subprocess.run`, `os.system` with string concatenation or `shell=True` plus user input.
+
+**Not covered:**
+- Go's `exec.Command` — Go is out of scope. (OUT OF SCOPE.)
+- Rust's `std::process::Command` — Rust is out of scope. (OUT OF SCOPE.)
+- Node.js `child_process.execFile()` and `spawnSync()` — these are safer by design (no shell expansion when called with an array) but `execFile` with a concatenated string argument is still injectable. (MEDIUM — add `execFile` to the sink list.)
+- Python `shlex.split()` followed by `subprocess.run()` is a safe pattern and is not flagged. This is correct behavior.
 
 ---
 
@@ -238,6 +290,16 @@ Uses the same taint-source logic as PRBL-I001.
 
 **Severity:** HIGH.
 
+#### Known Limitations
+
+**Covered:** Bare `eval()`, `exec()`, `new Function()`, `__import__()`, `compile(..., 'exec')` — with user taint. Method calls on other objects (`.eval()`, `.exec()`) are correctly excluded.
+
+**Not covered:**
+- Ruby's `eval`, `instance_eval`, `class_eval` — Ruby is out of scope. (OUT OF SCOPE.)
+- PHP's `eval()` — PHP is out of scope. (OUT OF SCOPE.)
+- Python `importlib.import_module(user_input)` — a less common but equivalent code-injection vector. (MEDIUM — add `import_module` to the pattern list.)
+- JavaScript `Function` constructor via indirect reference (e.g. `(0, eval)(input)` or `window['eval'](input)`) — these obfuscated forms are not detected, but they're vanishingly rare in AI-generated code. (Acceptable tradeoff.)
+
 ---
 
 ### PRBL-I004 — NoSQL Injection
@@ -266,6 +328,16 @@ Passing `req.body` or `req.query` directly into a MongoDB query operator positio
 Uses the same taint-source logic as PRBL-I001.
 
 **Severity:** HIGH.
+
+#### Known Limitations
+
+**Covered:** Mongoose `find`, `findOne`, `findOneAndUpdate`, `findOneAndDelete`, `deleteOne/Many`, `updateOne/Many`, `count`, `countDocuments` with `req.body` / `req.query` / `req.params` or `request.json` / `request.args` passed directly. `$where` string interpolation and `mapReduce` interpolation.
+
+**Not covered:**
+- `pymongo` (Python MongoDB driver): `collection.find({"name": request.args["name"]})` where the user value is embedded in a dict literal rather than passed as the whole query object — the current pattern only fires when `request.args` or `request.form` is the *direct* argument to the query method, not when it's a value inside a nested dict. (MEDIUM — new sub-pattern needed for dict-value injection.)
+- `mongo-go-driver` — Go is out of scope. (OUT OF SCOPE.)
+- DynamoDB `FilterExpression` string injection — different NoSQL store, no pattern coverage. (OUT OF SCOPE — distinct vulnerability class.)
+- Firestore `where()` chained with user input — no pattern coverage; Firestore queries use a builder API that is generally injection-resistant, but expression injection is possible in edge cases. (MEDIUM — new rule or sub-pattern needed.)
 
 ---
 
@@ -344,6 +416,16 @@ Reports **at most one finding per file** to avoid inflating counts when the same
 
 **Severity:** MEDIUM (or LOW for public/rate-limited routes).
 
+#### Known Limitations
+
+**Covered:** Express, Flask, Django, FastAPI, NestJS route patterns and Next.js / Vercel / Netlify / AWS Lambda serverless handler exports. A wide range of auth middleware names, decorator patterns, and inline auth function calls.
+
+**Not covered:**
+- Rails controllers (`def show; @user = User.find(params[:id]); end`) — Ruby is out of scope. (OUT OF SCOPE.)
+- Go `net/http` handler functions (`func(w http.ResponseWriter, r *http.Request)`) — Go is out of scope. (OUT OF SCOPE.)
+- GraphQL resolvers (e.g. Apollo Server `resolvers.Query.user`) — no route-pattern match for resolver objects; the taint/sensitive-operation logic could fire but the route-detection gate doesn't recognize resolver function signatures. (MEDIUM — add resolver function signature detection.)
+- Hono, Fastify, Koa, and other Node.js frameworks not in the pattern list — routes like `app.get(...)` already match via the generic Express pattern, but framework-specific patterns (e.g. Fastify `fastify.route({ method, url, handler })`) would be missed. (MEDIUM — expand route pattern list.)
+
 ---
 
 ### PRBL-T001 — Path Traversal
@@ -363,6 +445,37 @@ Uses the same taint-source logic as injection rules to confirm user control.
 Input like `../../etc/passwd` or `..\\..\\.env` escapes the intended directory and reads (or overwrites) arbitrary files — including the application's `.env` file containing every secret.
 
 **Severity:** HIGH.
+
+#### Known Limitations
+
+**Covered:** Node.js `fs` module functions (`readFile`, `readFileSync`, `createReadStream`, `createWriteStream`, `writeFile`, `writeFileSync`, `unlink`, `unlinkSync`), Express `res.sendFile()`, Flask `send_file()` / `send_from_directory()`, FastAPI `FileResponse()`, Python `open()`, and now pathlib `read_text()` / `read_bytes()` / `write_text()` / `write_bytes()`.
+
+**Not covered:**
+- Go's `os.Open(path)` — Go is out of scope. (OUT OF SCOPE.)
+- Rails `send_file` — Ruby is out of scope. (OUT OF SCOPE.)
+- Python `shutil.copy(src, dst)` and `shutil.move(src, dst)` with user-controlled paths — `shutil` functions are not in the sink list. (MEDIUM — add `shutil.copy`, `shutil.move`, `shutil.rmtree` as sinks.)
+- `pathlib.Path(user_input)` passed to functions that are not sinks themselves (e.g. a custom file-serving utility that takes a `Path` object) — multi-hop taint tracking is beyond the current regex model. (Acceptable tradeoff.)
+
+---
+
+### PRBL-P001 — Hallucinated / Non-Existent Package
+
+**Emerging — no CWE · OWASP A03 — Supply Chain Failures**
+
+Detects imports of packages that do not exist on the public registry. AI models frequently hallucinate plausible-sounding package names; if an attacker registers the hallucinated name, every project that runs `npm install` or `pip install` after code generation installs the malicious package.
+
+**Registries checked:** npm (via registry.npmjs.org) and PyPI (via pypi.org/pypi). All checks happen at scan time via HTTP — this is the only rule with network calls.
+
+#### Known Limitations
+
+**Covered:** Python `import` and `from X import` statements checked against PyPI; JavaScript/TypeScript `require()` and `import` statements checked against npm. Handles import-name → package-name aliasing for common packages that install under different names (e.g. `rest_framework` → `djangorestframework`).
+
+**Not covered:**
+- crates.io (Rust) — Rust is out of scope for the scanner entirely. (OUT OF SCOPE.)
+- RubyGems — Ruby is out of scope. (OUT OF SCOPE.)
+- Go modules (`go.mod` imports) — Go is out of scope. (OUT OF SCOPE.)
+- Private / internal package registries — if a team uses a private npm registry or PyPI mirror, a package that 404s on the public registry may be intentional. The scanner has no way to know about private registries and will false-positive on these. (MEDIUM — add a configurable allow-list of known-internal package name prefixes.)
+- Scoped npm packages (`@company/internal-lib`) — the registry check fires a 404 on private scoped packages. Same caveat as above; scoped packages under well-known orgs (`@aws-sdk`, `@types`, etc.) are generally safe but unknowns will produce noise. (Acceptable tradeoff — scoped packages should be verified.)
 
 ---
 
@@ -402,3 +515,29 @@ Categories and rankings follow the **OWASP Top 10 2021** revision (the current s
 | PRBL-R001 | A04 — Insecure Design (Cryptographic Failures) |
 | PRBL-I001, PRBL-I002, PRBL-I003, PRBL-I004 | A05 — Injection |
 | PRBL-A001, PRBL-T001 | A01 — Broken Access Control |
+
+---
+
+## Roadmap
+
+Prioritized MEDIUM items from the Known Limitations analysis above. Sorted by estimated impact (coverage gap × real-world frequency in AI-generated code):
+
+1. **PRBL-I001 — SQLAlchemy `text()` sink** · Add `text(` to SQL injection sinks for Python. SQLAlchemy `text("SELECT ... WHERE id = " + user_id)` is a common pattern in AI-generated Python backends and is currently not detected. Low false-positive risk because `text(` is unambiguous in SQLAlchemy context.
+
+2. **PRBL-I001 — Python `.format()` string SQL injection** · Add `"SELECT...".format(var)` pattern. The `%`-format gap is now fixed; `.format()` is the other common legacy interpolation style and is similarly unsafe with psycopg2 or raw sqlite3. Clear test cases exist.
+
+3. **PRBL-A001 — GraphQL resolver function signature detection** · AI-generated GraphQL backends (Apollo Server, Strawberry, Ariadne) are common and never have route declarations in the Express/Flask sense. A resolver-function pattern like `resolvers.Query.someField = (_, args) =>` performing a DB operation with no auth check is a real PRBL-A001 gap with meaningful frequency.
+
+4. **PRBL-I004 — `pymongo` dict-value injection** · `collection.find({"name": request.args["name"]})` — the user value is inside a dict literal rather than the whole query argument. The current pattern only catches direct pass-through. A new sub-pattern for `request.args[...]` or `request.form[...]` as a dict value in a `.find(` / `.findOne(` call would cover this.
+
+5. **PRBL-I002 — `child_process.execFile()` sink** · Add `execFile` to command injection sinks. `execFile` with a user-controlled first argument (the executable path) is injectable even without shell expansion. Straightforward pattern addition.
+
+6. **PRBL-T001 — `shutil` sinks** · Add `shutil.copy`, `shutil.move`, `shutil.rmtree` as path traversal sinks for Python. These are destructive file operations and are commonly generated without sanitization in file-management utilities.
+
+7. **PRBL-I003 — `importlib.import_module(user_input)`** · Add `import_module(` to code injection patterns. Less common than `eval`/`exec`, but AI-generated plugin-loader code sometimes generates this pattern with user-controlled module names.
+
+8. **PRBL-P001 — Private registry allow-list** · Add a configurable list of package name prefixes that should skip the registry check (e.g. `@mycompany/`). Reduces noise for teams with private registries without disabling the rule entirely.
+
+9. **PRBL-A001 — Fastify / Hono / Koa route patterns** · Expand `_ROUTE_PATTERNS["javascript"]` with Fastify's `fastify.route()` / `fastify.get()` and Hono's `app.get()`. These already partially work via the generic Express pattern but the Fastify object-config style (`{ method, url, handler }`) is missed.
+
+10. **PRBL-C001 — Dict-literal credential detection** · `config = {"password": "hunter2"}` is not caught because the assignment pattern requires `=` syntax. A new pattern for string values inside dict literals where the key is a credential name would cover this common AI-generated config initialization pattern.

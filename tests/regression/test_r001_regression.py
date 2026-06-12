@@ -159,3 +159,45 @@ req.session.id = sessionId
     assert r001, "PRBL-R001 must fire for sessionId"
     assert r001[0]['severity'] == 'high', \
         f"sessionId must be HIGH severity. Got: {r001[0]['severity']}"
+
+
+# ── EASY FIX: uuid.v1() weak randomness ───────────────────────────────────────
+
+def test_uuid_v1_for_token_fires():
+    """True positive: uuid.v1() used near session/token context fires R001.
+
+    UUID v1 is time-based and includes the MAC address — it is predictable and
+    leaks host identity. uuid.v4() is the correct choice for security tokens.
+    """
+    code = '''
+import { v1 as uuidv1 } from 'uuid'
+const token = uuidv1()
+res.cookie('session', token)
+'''
+    findings = run(code)
+    r001 = [f for f in findings if f['rule_id'] == 'PRBL-R001']
+    assert r001, "PRBL-R001 must fire when uuid.v1() is used near session context"
+
+
+def test_uuidv1_bare_import_for_token_fires():
+    """True positive: uuidv1() (bare import) near session context fires R001."""
+    code = '''
+const uuidv1 = require('uuid/v1')
+const sessionToken = uuidv1()
+'''
+    findings = run(code)
+    r001 = [f for f in findings if f['rule_id'] == 'PRBL-R001']
+    assert r001, "PRBL-R001 must fire for uuidv1() near session context"
+
+
+def test_uuid_v4_not_flagged():
+    """True negative: uuid.v4() is cryptographically secure and must not fire."""
+    code = '''
+import { v4 as uuidv4 } from 'uuid'
+const token = uuidv4()
+res.cookie('session', token)
+'''
+    findings = run(code)
+    r001 = [f for f in findings if f['rule_id'] == 'PRBL-R001']
+    assert not r001, \
+        f"PRBL-R001 must not fire on uuid.v4() — it is cryptographically secure. Got: {r001}"

@@ -60,3 +60,54 @@ def test_dirname_only_not_flagged():
     t001 = [f for f in findings if f['rule_id'] == 'PRBL-T001']
     assert not t001, \
         f"PRBL-T001 must not fire on static __dirname join. Got: {t001}"
+
+
+# ── EASY FIX: pathlib read_text / read_bytes sinks ────────────────────────────
+
+def test_pathlib_read_text_user_input_fires():
+    """True positive: pathlib Path.read_text() with user-controlled path fires T001."""
+    code = '''
+from pathlib import Path
+def serve_file(filename):
+    return Path('/uploads/' + filename).read_text()
+'''
+    findings = run(code, language='python', file_path='views.py')
+    assert any(f['rule_id'] == 'PRBL-T001' for f in findings), \
+        "PRBL-T001 must fire on pathlib Path.read_text() with user-controlled path"
+
+
+def test_pathlib_read_bytes_user_input_fires():
+    """True positive: pathlib Path.read_bytes() with user-controlled path fires T001."""
+    code = '''
+from pathlib import Path
+def download(request):
+    name = request.args.get('file')
+    return Path('/data/' + name).read_bytes()
+'''
+    findings = run(code, language='python', file_path='api.py')
+    assert any(f['rule_id'] == 'PRBL-T001' for f in findings), \
+        "PRBL-T001 must fire on pathlib Path.read_bytes() with user input"
+
+
+def test_pathlib_static_path_not_flagged():
+    """True negative: pathlib Path.read_text() on a static path must not fire."""
+    code = '''
+from pathlib import Path
+config = Path('/etc/app/config.json').read_text()
+'''
+    findings = run(code, language='python', file_path='init.py')
+    t001 = [f for f in findings if f['rule_id'] == 'PRBL-T001']
+    assert not t001, \
+        f"PRBL-T001 must not fire on pathlib read_text() with fully static path. Got: {t001}"
+
+
+# ── EASY FIX: C002 Django SECRET_KEY_BASE context ─────────────────────────────
+
+def test_c002_secret_key_base_fires():
+    """True positive: SECRET_KEY_BASE with hardcoded value fires C002."""
+    code = '''
+SECRET_KEY_BASE = 'hardcoded-very-long-secret-value-123456789'
+'''
+    findings = run(code, language='python', file_path='settings.py')
+    c002 = [f for f in findings if f['rule_id'] == 'PRBL-C002']
+    assert c002, "PRBL-C002 must fire on hardcoded SECRET_KEY_BASE"
