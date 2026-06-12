@@ -630,6 +630,40 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
 
 # ── 4. MISSING ACCESS CONTROL ─────────────────────────────────────────────────
 
+_INLINE_AUTH_CALLS = [
+    re.compile(r) for r in [
+        r'requireAuth\s*\(',
+        r'requireUser\s*\(',
+        r'requireSession\s*\(',
+        r'requirePro\s*\(',
+        r'requireAdmin\s*\(',
+        r'getServerSession\s*\(',
+        r'getSession\s*\(',
+        r'auth\(\)',
+        r'verifySession\s*\(',
+        r'checkAuth\s*\(',
+        r'authenticate\s*\(',
+        r'getCurrentUser\s*\(',
+        r'requireApiKey\s*\(',
+    ]
+]
+
+_DEMO_CONTENT_PATHS = [
+    'remotion/',
+    'heroanimation',
+    'heroscanner',
+    'heroplayer',
+    '/animations/',
+    '/demo/',
+    '/marketing/',
+    '/examples/',
+    # Next.js / landing page root — page.tsx in the app root is typically the
+    # marketing landing page, not application logic
+    'app/page.tsx',
+    'pages/index.',
+    'src/pages/index.',
+]
+
 _ROUTE_PATTERNS = {
     "javascript": [
         r'(?i)(app|router)\.(get|post|put|patch|delete)\s*\(\s*["\']',
@@ -696,7 +730,10 @@ _AUTH_INDICATORS = re.compile(
     # NestJS @Public() decorator — explicit opt-out of auth. If the developer
     # intentionally marked a route public, it's an explicit access control decision.
     # Suppress PRBL-A001 — this is the right outcome either way.
-    r'@Public\b|IsPublic\b|SkipAuth\b|AllowAnonymous\b)',
+    r'@Public\b|IsPublic\b|SkipAuth\b|AllowAnonymous\b|'
+    # Stripe webhook signature verification — constructEvent validates the payload signature,
+    # which is the correct auth mechanism for webhook endpoints
+    r'constructEvent\s*\(|webhooks\.constructEvent)',
 )
 
 # Auth indicators that are only safe to check on the ROUTE LINE ITSELF.
@@ -858,6 +895,12 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
                 has_auth = bool(_AUTH_INDICATORS.search(stripped_text))
 
             if has_sensitive and not has_auth:
+                # Check for inline auth calls in the first 10 lines after the handler export
+                body_start = handler_line  # 0-indexed: handler_line is 1-indexed line number
+                body_window = '\n'.join(lines[body_start:body_start + 10])
+                if any(p.search(body_window) for p in _INLINE_AUTH_CALLS):
+                    return findings  # inline auth found — not a real finding
+
                 handler_line_str = lines[handler_line - 1].strip()
                 findings.append(_match(
                     rule_id="PRBL-A001",
@@ -938,7 +981,8 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
             bool(_AUTH_INDICATORS.search(line)) or
             bool(_ROUTE_LINE_AUTH.search(line)) or
             bool(_AUTH_INDICATORS.search(lookahead_text)) or
-            bool(_AUTH_INDICATORS.search(lookback_text))
+            bool(_AUTH_INDICATORS.search(lookback_text)) or
+            any(p.search('\n'.join(lines[i + 1:i + 11])) for p in _INLINE_AUTH_CALLS)
         )
 
         # NestJS: class-level @UseGuards() decorator sits ABOVE the class declaration.
@@ -1242,13 +1286,27 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
     findings = []
 
     is_test = _is_test_file(file_path)
+    is_demo = file_path and any(p in file_path.lower() for p in _DEMO_CONTENT_PATHS)
 
     # PRBL-C001: skip hardcoded credential findings in test/spec files.
     # password='Secure123' in tests/test_views.py is a test fixture, not a
     # production secret. Seed scripts and management commands are NOT test
     # files and remain in scope.
     if not is_test:
-        findings += check_hardcoded_credentials(lines)
+        cred_findings = check_hardcoded_credentials(lines)
+        if is_demo:
+            # Demo/animation/marketing files: downgrade PRBL-C001 to LOW instead of skipping.
+            # If a string here is a real credential used in app logic elsewhere, it still
+            # needs to be addressed there — but flagging it HIGH in a Remotion animation is noise.
+            for m in cred_findings:
+                if m.rule_id == "PRBL-C001":
+                    m.severity = "low"
+                    m.detail = (
+                        "This file appears to be demo, marketing, or animation content. "
+                        "If this string is a real credential used in application logic elsewhere, "
+                        "it should still be addressed there."
+                    )
+        findings += cred_findings
     else:
         # Still catch real credential formats (AWS keys, Stripe live keys,
         # hardcoded JWTs) even in test files — those are always wrong.
