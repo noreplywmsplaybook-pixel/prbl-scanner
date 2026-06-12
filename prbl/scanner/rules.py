@@ -46,6 +46,7 @@ _OWASP: dict[str, tuple[str, str, int]] = {
     "PRBL-I004": ("CWE-943",    "A05 — Injection",               5),
     "PRBL-C002": ("CWE-798",    "A07 — Authentication Failures", 7),
     "PRBL-T001": ("CWE-22",     "A01 — Broken Access Control",   1),
+    "PRBL-R002": ("CWE-208",    "A02 — Cryptographic Failures",  2),
 }
 
 
@@ -434,6 +435,166 @@ def check_weak_randomness(lines: list[str], language: str) -> list[RuleMatch]:
                     severity=sev,
                 ))
                 break
+    return findings
+
+
+# ── 2b. TIMING-SAFE COMPARISON (PRBL-R002) ────────────────────────────────────
+
+_DIGEST_CALL = re.compile(
+    r'(?i)(\.hexdigest\s*\(|\.digest\s*\(|createHmac\s*\(|hmac\.new\s*\(|hashlib\.\w+\s*\()'
+)
+# HMAC-specific pattern: createHmac / hmac.new are authentication MACs that always
+# need timing-safe comparison regardless of whether request taint is visible in the window.
+_HMAC_CALL = re.compile(
+    r'(?i)(createHmac\s*\(|hmac\.new\s*\(|hmac\.digest\s*\()'
+)
+_TIMING_SAFE_PRESENT = re.compile(
+    r'(?i)(timingSafeEqual|compare_digest|secrets\.compare_digest|hmac\.compare_digest)'
+)
+_TIMING_UNSAFE_CMP = re.compile(
+    r'(?:===|==|!==|!=)'
+)
+_TIMING_WEBHOOK_VARS = re.compile(
+    r'(?i)\b(verification_token|webhook_secret|webhook_token|expected_signature|'
+    r'computed_signature|x_hub_signature|x_signature|hmac_signature|'
+    r'open_verification_token|signature_token|api_signature|request_signature|'
+    r'callback_token|hook_secret|hook_token)\b'
+)
+_TIMING_REQUEST_TAINT = re.compile(
+    r'(?i)(req\.(body|headers|query|params)|request\.(args|headers|form|json|values))'
+)
+_TIMING_STRING_LITERAL = re.compile(
+    r"""(?:===|!==|==|!=)\s*["']|["']\s*(?:===|!==|==|!=)"""
+)
+
+
+def check_timing_comparison(lines: list[str], language: str) -> list[RuleMatch]:
+    findings = []
+    digest_vars: set[str] = set()   # track variable names assigned any digest result
+    hmac_vars: set[str] = set()     # subset: variables assigned HMAC-specific results
+
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith(('#', '//', '*')):
+            continue
+
+        # Track variables assigned digest/HMAC results
+        if _DIGEST_CALL.search(line):
+            # Match: var = ..., const/let/var name = ..., or name: type = ...
+            assign_m = re.search(r'(?:const|let|var)\s+(\w+)\s*=|^\s*(\w+)\s*=\s*', line)
+            if assign_m:
+                var_name = assign_m.group(1) or assign_m.group(2)
+                if var_name:
+                    digest_vars.add(var_name)
+                    # Track as HMAC var if:
+                    # 1. The line directly calls createHmac/hmac.new (e.g. createHmac(...).update(...).digest(...))
+                    # 2. The right side of the assignment uses a previously-tracked HMAC var
+                    #    (e.g. const sig = hmacObj.update(payload).digest('hex') where hmacObj is in hmac_vars)
+                    is_hmac_assignment = bool(_HMAC_CALL.search(line))
+                    if not is_hmac_assignment and hmac_vars:
+                        # Check if any tracked hmac var appears on the RHS of this assignment
+                        rhs = line[assign_m.end():]
+                        for hvar in hmac_vars:
+                            if re.search(rf'\b{re.escape(hvar)}\b', rhs):
+                                is_hmac_assignment = True
+                                break
+                    if is_hmac_assignment:
+                        hmac_vars.add(var_name)
+
+        # Build 5-line window
+        window_start = max(0, i - 3)
+        window_end = min(len(lines), i + 3)
+        window = '\n'.join(lines[window_start:window_end])
+
+        # Skip if safe comparison is present in window
+        if _TIMING_SAFE_PRESENT.search(window):
+            continue
+
+        # Skip type guards
+        if re.search(r'typeof\s+\w+\s*(?:===|==)', line):
+            continue
+
+        # String-literal-only check: a line whose ONLY comparisons involve string literals
+        # is a routing/enum check. But if the line ALSO contains webhook var + request taint,
+        # there are multiple comparisons — the token comparison is still unsafe.
+        line_has_string_literal_cmp = bool(_TIMING_STRING_LITERAL.search(line))
+
+        fired = False
+
+        # Sub-pattern A: digest output compared with === or ==
+        # String literal on the same line doesn't suppress — the digest comparison is distinct.
+        if _TIMING_UNSAFE_CMP.search(line):
+            # Direct: hmac.new(...).hexdigest() == value on same line
+            if _DIGEST_CALL.search(line):
+                fired = True
+            # Indirect: previously-tracked digest var compared.
+            # For HMAC vars (createHmac/hmac.new), fire without requiring request taint —
+            # HMAC comparisons are always authentication-critical.
+            # For non-HMAC digest vars (createHash, hashlib.*), require request taint in
+            # window to avoid flagging PKCE/hash-comparison patterns where both sides are
+            # derived values with no secret involved (e.g. PKCE codeChallenge comparison).
+            elif digest_vars:
+                for var in digest_vars:
+                    if re.search(rf'\b{re.escape(var)}\b', line) and _TIMING_UNSAFE_CMP.search(line):
+                        is_hmac_var = var in hmac_vars
+                        has_request_taint_in_window = bool(_TIMING_REQUEST_TAINT.search(window))
+                        if is_hmac_var or has_request_taint_in_window:
+                            fired = True
+                            break
+
+        # Sub-pattern B: webhook/signature token compared with request-derived value
+        if not fired and _TIMING_UNSAFE_CMP.search(line):
+            has_webhook_var = bool(_TIMING_WEBHOOK_VARS.search(line))
+            # Request taint can be on the comparison line or in the 5-line window
+            has_request_taint = bool(_TIMING_REQUEST_TAINT.search(line)) or bool(_TIMING_REQUEST_TAINT.search(window))
+            if has_webhook_var and has_request_taint:
+                # Only suppress if there's a string literal AND no webhook var + request taint
+                # combination that survives the literal check (i.e., purely a routing line)
+                fired = True
+
+        # If the only trigger was a string-literal comparison with no qualifying webhook/digest context,
+        # suppress. Specifically: if line has a string literal cmp and fired only via sub-pattern A
+        # without a digest call (which is already not possible above), do nothing extra.
+        # The key suppression: if we fired via sub-pattern B but the line ONLY has string literals
+        # (no real webhook var or request taint beyond the literal), don't fire.
+        # Since we already require webhook_var AND request_taint, the only remaining FP is a line
+        # where webhook_secret is compared to a string literal — but that's caught by the
+        # string literal guard applied specifically when there's no non-literal operand.
+        # Check: if line has string literal cmp and no non-literal comparison with webhook var
+        if fired and line_has_string_literal_cmp:
+            # Check if the webhook var is directly adjacent to a string literal comparison
+            # Pattern: webhook_var === 'literal' or 'literal' === webhook_var
+            webhook_vs_literal = re.search(
+                r'(?:' + _TIMING_WEBHOOK_VARS.pattern + r')\s*(?:===|!==|==|!=)\s*["\']'
+                r'|["\']s*(?:===|!==|==|!=)\s*(?:' + _TIMING_WEBHOOK_VARS.pattern + r')',
+                line, re.IGNORECASE
+            )
+            # If webhook var is directly compared to a string literal (and no request taint on line),
+            # suppress — it's a feature flag / routing check
+            if webhook_vs_literal and not _TIMING_REQUEST_TAINT.search(line):
+                fired = False
+
+        if fired:
+            fix_py = "Use hmac.compare_digest(a, b) instead of ==. Ensure both values are bytes or both are str."
+            fix_js = "Use crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)) instead of ===. Ensure both Buffers are the same length first."
+            fix = fix_py if language == 'python' else fix_js
+            findings.append(_match(
+                rule_id="PRBL-R002",
+                vuln_class="timing_comparison",
+                line_number=i,
+                line=stripped,
+                title="Insecure equality comparison on security-critical value",
+                detail=(
+                    "A security-critical value (HMAC digest, webhook signature, or verification token) "
+                    "is being compared with `==` or `===`. String equality short-circuits on the first "
+                    "differing byte, leaking timing information. An attacker making thousands of requests "
+                    "can reconstruct the expected value one byte at a time — bypassing webhook signature "
+                    "verification or token authentication without knowing the secret."
+                ),
+                fix=fix,
+                severity="high",
+            ))
+
     return findings
 
 
@@ -1385,6 +1546,7 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
         ]
 
     findings += check_weak_randomness(lines, language)
+    findings += check_timing_comparison(lines, language)
     findings += check_injection(lines, language)
     findings += check_nosql_injection(lines, language)
     findings += check_path_traversal(lines, language)

@@ -189,6 +189,82 @@ These functions are seeded from predictable system state. An attacker who observ
 
 ---
 
+### PRBL-R002 — Insecure Equality Comparison on Security-Critical Value
+
+**CWE-208 · OWASP A02 — Cryptographic Failures**
+
+Detects HMAC digests, webhook signatures, and verification tokens being compared with `==` or `===` instead of a constant-time comparison function. String equality short-circuits on the first differing byte, leaking timing information. An attacker making thousands of requests can reconstruct the expected value one byte at a time — bypassing webhook signature verification or token authentication without knowing the secret.
+
+There are two sub-patterns:
+
+#### Sub-pattern A — HMAC/crypto digest output compared with `==`/`===`
+
+Detects a crypto digest call (`.digest()`, `.hexdigest()`, `.update(...).digest(...)`, `createHmac(...)`) on a line, or assigned to a variable that is then compared within the surrounding 5-line window, using `==`/`===`/`!==`/`!=`, without a safe comparison function nearby.
+
+```python
+# Python — direct
+if hmac.new(key, msg).hexdigest() == provided_value:
+    allow()
+
+# Python — assigned then compared
+computed = hashlib.sha256(data).hexdigest()
+if computed == request.args['signature']:   # within 5 lines of assignment
+    allow()
+```
+
+```javascript
+// JS/TS — assigned then compared
+const sig = crypto.createHmac('sha256', secret).update(payload).digest('hex')
+if (sig === req.headers['x-hub-signature']) {   // within 5 lines of assignment
+  processWebhook()
+}
+```
+
+#### Sub-pattern B — Webhook/signature token compared with request-derived value
+
+Detects a variable whose name matches webhook/signature naming compared with a request-derived value using `==`/`===`, without a safe comparison function nearby.
+
+```javascript
+// cal.com feishucalendar/larkcalendar pattern (true positive)
+if (req.body.token === open_verification_token) { ... }
+if (open_verification_token === req.body.token) { ... }
+```
+
+```python
+# Python equivalent
+if request.headers.get('X-Signature') == webhook_secret:
+    handle_event()
+```
+
+**Variable name signals (webhook/signature names — not general security vars):**
+`verification_token`, `webhook_secret`, `webhook_token`, `expected_signature`, `computed_signature`, `x_hub_signature`, `x_signature`, `hmac_signature`, `open_verification_token`, `signature_token`, `api_signature`, `request_signature`, `callback_token`, `hook_secret`, `hook_token`.
+
+**Taint requirement:** at least one side of the comparison must be request-derived (`req.body`, `req.headers`, `req.query`, `request.args`, `request.headers`, `request.form`) — checked on the comparison line or within the 5-line window.
+
+**Safe contexts (not flagged):**
+- `hmac.compare_digest()`, `secrets.compare_digest()`, or `crypto.timingSafeEqual()` present in the 5-line window.
+- One side of the comparison is a **string literal** (routing/discriminator logic, not stored credential comparison) — e.g. `=== 'url_verification'`, `=== 'expired'`.
+- `typeof x === 'string'` type guard patterns.
+- Compound expressions where the only string-literal comparisons are type discriminators: if the line contains both a type discriminator (`=== "url_verification"`) AND a token comparison against a request value, the token comparison is still flagged.
+
+**Fix (Python):** `hmac.compare_digest(a, b)` — both values must be `str` or both `bytes`.
+
+**Fix (JS/TS):** `crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b))` — ensure both Buffers are the same length.
+
+**Severity:** HIGH.
+
+#### Known Limitations
+
+**Covered:** Direct HMAC digest comparisons on the same line; digest variables tracked and matched within a 5-line window; webhook/signature variable names with request taint. Both Python (`hmac`, `hashlib`) and JavaScript/TypeScript (`crypto.createHmac`, `.digest()`) patterns.
+
+**Not covered:**
+- Multi-file taint tracking: if the digest is computed in one module and compared in another, only the comparison file is analyzed. (Acceptable tradeoff — regex-based model.)
+- Intermediate variable taint: if `incoming = request.args.get('sig')` is assigned several lines before the comparison, only the window-based request taint check catches it. For window sizes beyond 5 lines, this may miss some cases. (Acceptable tradeoff.)
+- Go's `subtle.ConstantTimeCompare` gap vs `==` — Go is out of scope. (OUT OF SCOPE.)
+- Ruby's `Rack::Utils.secure_compare` gap — Ruby is out of scope. (OUT OF SCOPE.)
+
+---
+
 ### PRBL-I001 — SQL Injection
 
 **CWE-89 · OWASP A05 — Injection**
@@ -544,6 +620,4 @@ Prioritized MEDIUM items from the Known Limitations analysis above. Sorted by es
 
 2. **PRBL-P001 — Private registry allow-list** · Add a configurable list of package name prefixes that should skip the registry check (e.g. `@mycompany/`). Reduces noise for teams with private registries without disabling the rule entirely.
 
-3. **PRBL-R001 — Timing-safe comparison gap** *(sourced from Trail of Bits research — needs validation before implementing)* · Add a sub-pattern detecting direct `==` comparison on values in `mac`, `digest`, `hmac`, `signature`, `token` variable contexts in Python (should use `hmac.compare_digest()`) and JavaScript (should use `crypto.timingSafeEqual()`). ToB's constant-time-analysis skill documents this as a distinct vulnerability class across 12 languages; it is not currently captured by the RNG-source focus of PRBL-R001.
-
-12. **PRBL-A001 — Prototype pollution access control bypass** *(sourced from Trail of Bits research — needs validation before implementing)* · Add a sub-pattern detecting unsafe merge/assign of untrusted input (`req.body`, `req.query`) into plain objects — e.g. `Object.assign({}, req.body)`, custom recursive merge functions — where the result is used in an authorization check. ToB sharp-edges JS reference documents `{"__proto__": {"isAdmin": true}}` as a pre-authentication privilege escalation that bypasses all route-level auth indicators without touching a recognized auth pattern.
+3. **PRBL-A001 — Prototype pollution access control bypass** *(sourced from Trail of Bits research — needs validation before implementing)* · Add a sub-pattern detecting unsafe merge/assign of untrusted input (`req.body`, `req.query`) into plain objects — e.g. `Object.assign({}, req.body)`, custom recursive merge functions — where the result is used in an authorization check. ToB sharp-edges JS reference documents `{"__proto__": {"isAdmin": true}}` as a pre-authentication privilege escalation that bypasses all route-level auth indicators without touching a recognized auth pattern.
