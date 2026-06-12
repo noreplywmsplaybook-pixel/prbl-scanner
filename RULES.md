@@ -92,6 +92,8 @@ Affected paths (case-insensitive): `remotion/`, files named `HeroAnimation`, `He
 - Config files (YAML, JSON, TOML, `.env`) — the scanner receives source code, not config; secrets in `config/database.yml` or `docker-compose.yml` are out of scope. (OUT OF SCOPE for this scanner; a dedicated secrets-in-config tool is the right instrument.)
 - Go `const` declarations (`const apiKey = "sk_live_..."`) and Rust `static` bindings (`static API_KEY: &str = "..."`) — the scanner has no Go or Rust language mode. (OUT OF SCOPE — different language.)
 - Ruby constants (`API_KEY = "sk_live_..."`) — same language-scope gap. (OUT OF SCOPE.)
+- Ruby `ENV.fetch('SECRET_KEY', 'fallback-value')` fallback pattern — ToB insecure-defaults research shows this is a common Rails pattern equivalent to the Python `os.getenv(x, default)` antipattern already detected; requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
+- Java `System.getenv().getOrDefault("DB_PASSWORD", "hardcoded")` fallback — ToB insecure-defaults examples flag this as an equivalent credential exposure pattern; requires Java language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
 - The generic assignment pattern requires `=` syntax; it will miss Python dict-literal secrets like `config = {"password": "hunter2"}` unless the dict key matches a recognized name near an `=`. (MEDIUM — dict-literal pattern would need a new sub-pattern.)
 
 ---
@@ -131,6 +133,7 @@ Anyone with read access to the repository can forge valid session cookies or JWT
 
 **Not covered:**
 - Rails `secret_key_base` in `config/secrets.yml` or `credentials.yml.enc` — Ruby is out of scope, and these are config files rather than source code. (OUT OF SCOPE.)
+- Rails source code pattern `Rails.application.credentials.secret_key_base = ENV.fetch('SECRET_KEY_BASE', 'weak-fallback')` — ToB insecure-defaults research highlights this inline fallback as common in generated Rails code; requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
 - ASP.NET `DataProtection` keys and `IDataProtector` configuration — C# is out of scope. (OUT OF SCOPE.)
 - Go `gorilla/sessions` `sessions.NewCookieStore([]byte("secret"))` — Go is out of scope. (OUT OF SCOPE.)
 - `jsonwebtoken` `sign()` calls where the secret is passed as a variable rather than a literal (e.g. `jwt.sign(payload, secretVar)` where `secretVar` was assigned the literal earlier in the file) — multi-line data-flow tracking is beyond the current regex model. (MEDIUM — would require cross-line variable tracking.)
@@ -169,6 +172,8 @@ These functions are seeded from predictable system state. An attacker who observ
 **Not covered:**
 - Go's `math/rand` vs `crypto/rand` distinction — Go is out of scope. (OUT OF SCOPE.)
 - Ruby's `rand` and `Kernel.rand` — Ruby is out of scope. (OUT OF SCOPE.)
+- Java's `java.util.Random` vs `java.security.SecureRandom` — ToB sharp-edges Java reference identifies `new Random()` in security contexts as equivalent to `Math.random()` misuse; requires Java language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
+- Timing-safe comparison gaps: using `==` to compare MACs, tokens, or digests instead of `hmac.compare_digest()` (Python) or a constant-time equivalent — ToB constant-time-analysis skill covers this across 12 languages as a distinct vulnerability class. Not currently detected by PRBL-R001 (which focuses on RNG source, not comparison). (MEDIUM — could add a sub-pattern detecting direct `==` comparison on values in `token`, `mac`, `digest`, `hmac` variable contexts; sourced from Trail of Bits research — needs validation before implementing.)
 - `nanoid` misuse: `nanoid` itself is cryptographically secure (uses `crypto.getRandomValues`); there is no common misuse pattern worth detecting here. Not a gap.
 - UUID v1 detection relies on the symbol name containing `v1` or `uuidv1` — if a developer aliases it as `const id = require('uuid').v1` and stores to an unrelated variable name, the context check (security word nearby) is the only gate. This is the intended behavior; flagging all UUID v1 calls regardless of context would produce too many false positives for timestamp-only use cases. (Acceptable tradeoff.)
 - Python's `secrets` module and `os.urandom` are already safe and correctly not flagged; no gap there.
@@ -223,6 +228,8 @@ f"INSERT INTO logs WHERE {condition}"
 - SQLAlchemy Core `text()` with string concatenation: `text("SELECT * FROM users WHERE id = " + uid)` — the `text()` call is not in the sink list. (MEDIUM — add `text(` as a sink with SQL context signal.)
 - Go's `database/sql` `db.Query("SELECT..." + input)` — Go is out of scope. (OUT OF SCOPE.)
 - Rails `ActiveRecord.where("name = '#{params[:name]}'")` with Ruby interpolation — Ruby is out of scope. (OUT OF SCOPE.)
+- Rails `ActiveRecord.order(params[:sort])` — ToB sharp-edges Ruby reference identifies this as a distinct SQL injection sub-pattern where unsanitized user input is passed to `.order()`, enabling column-name injection or `DROP TABLE` via semicolon; requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
+- Java JDBC `Statement.execute("SELECT... " + input)` vs parameterized `PreparedStatement` — no Java language support. (OUT OF SCOPE — different language.)
 - Raw `sqlite3` Python module: `conn.execute("SELECT..." + val)` — `conn` is not in the SQL context signals list, but `cursor` is, and the taint+SQL-keyword patterns should still fire if the variable is named `cursor` or `query`. (Acceptable tradeoff — renaming to non-standard variable is an edge case.)
 
 ---
@@ -259,6 +266,7 @@ Uses the same taint-source logic as PRBL-I001.
 **Not covered:**
 - Go's `exec.Command` — Go is out of scope. (OUT OF SCOPE.)
 - Rust's `std::process::Command` — Rust is out of scope. (OUT OF SCOPE.)
+- Ruby backticks, `%x(...)`, `system()`, and `exec()` with string interpolation (`` `ls #{params[:dir]}` ``) — ToB sharp-edges Ruby reference documents all four as command injection sinks; requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
 - Node.js `child_process.execFile()` and `spawnSync()` — these are safer by design (no shell expansion when called with an array) but `execFile` with a concatenated string argument is still injectable. (MEDIUM — add `execFile` to the sink list.)
 - Python `shlex.split()` followed by `subprocess.run()` is a safe pattern and is not flagged. This is correct behavior.
 
@@ -296,6 +304,9 @@ Uses the same taint-source logic as PRBL-I001.
 
 **Not covered:**
 - Ruby's `eval`, `instance_eval`, `class_eval` — Ruby is out of scope. (OUT OF SCOPE.)
+- Ruby `.send(user_input)` and `.public_send(user_input)` — ToB sharp-edges Ruby reference identifies these as code execution vectors; `.send` with user-controlled input can invoke arbitrary methods. Requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
+- Ruby `user_input.constantize` (Rails) and `Object.const_get(user_input)` — ToB sharp-edges Ruby reference identifies these Rails helpers as code execution paths; arbitrary class instantiation. Requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
+- Ruby `YAML.load(user_input)` — ToB sharp-edges Ruby reference documents this as an RCE vector (gadget chains via arbitrary object deserialization, as exploited in CVE-2013-0156). Distinct from `eval` but achieves the same result; safe alternative is `YAML.safe_load`. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
 - PHP's `eval()` — PHP is out of scope. (OUT OF SCOPE.)
 - Python `importlib.import_module(user_input)` — a less common but equivalent code-injection vector. (MEDIUM — add `import_module` to the pattern list.)
 - JavaScript `Function` constructor via indirect reference (e.g. `(0, eval)(input)` or `window['eval'](input)`) — these obfuscated forms are not detected, but they're vanishingly rare in AI-generated code. (Acceptable tradeoff.)
@@ -422,7 +433,9 @@ Reports **at most one finding per file** to avoid inflating counts when the same
 
 **Not covered:**
 - Rails controllers (`def show; @user = User.find(params[:id]); end`) — Ruby is out of scope. (OUT OF SCOPE.)
+- Rails `before_action :authenticate_user!` as the auth mechanism — ToB insecure-defaults research notes that Rails access control relies on `before_action` callbacks whose presence a line-proximity heuristic cannot reliably detect; even if Ruby support were added, the window-based auth-indicator approach would need a dedicated Rails callback pattern. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
 - Go `net/http` handler functions (`func(w http.ResponseWriter, r *http.Request)`) — Go is out of scope. (OUT OF SCOPE.)
+- JavaScript prototype pollution as an access control bypass — ToB sharp-edges JS reference documents `{"__proto__": {"isAdmin": true}}` passed to merge/assign utilities as an authentication bypass that bypasses route-level auth entirely without touching any recognized auth pattern. Not an access-control gap in the route-detection sense, but a pre-auth privilege escalation; no current Prbl rule covers this. (MEDIUM — would need a new sub-pattern detecting unsafe merge/assign of untrusted objects into plain JS objects; sourced from Trail of Bits research — needs validation before implementing.)
 - GraphQL resolvers (e.g. Apollo Server `resolvers.Query.user`) — no route-pattern match for resolver objects; the taint/sensitive-operation logic could fire but the route-detection gate doesn't recognize resolver function signatures. (MEDIUM — add resolver function signature detection.)
 - Hono, Fastify, Koa, and other Node.js frameworks not in the pattern list — routes like `app.get(...)` already match via the generic Express pattern, but framework-specific patterns (e.g. Fastify `fastify.route({ method, url, handler })`) would be missed. (MEDIUM — expand route pattern list.)
 
@@ -452,7 +465,7 @@ Input like `../../etc/passwd` or `..\\..\\.env` escapes the intended directory a
 
 **Not covered:**
 - Go's `os.Open(path)` — Go is out of scope. (OUT OF SCOPE.)
-- Rails `send_file` — Ruby is out of scope. (OUT OF SCOPE.)
+- Rails `send_file(params[:filename])` — ToB sharp-edges Ruby reference identifies `send_file` with user-controlled params as a direct path traversal pattern; requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
 - Python `shutil.copy(src, dst)` and `shutil.move(src, dst)` with user-controlled paths — `shutil` functions are not in the sink list. (MEDIUM — add `shutil.copy`, `shutil.move`, `shutil.rmtree` as sinks.)
 - `pathlib.Path(user_input)` passed to functions that are not sinks themselves (e.g. a custom file-serving utility that takes a `Path` object) — multi-hop taint tracking is beyond the current regex model. (Acceptable tradeoff.)
 
@@ -541,3 +554,7 @@ Prioritized MEDIUM items from the Known Limitations analysis above. Sorted by es
 9. **PRBL-A001 — Fastify / Hono / Koa route patterns** · Expand `_ROUTE_PATTERNS["javascript"]` with Fastify's `fastify.route()` / `fastify.get()` and Hono's `app.get()`. These already partially work via the generic Express pattern but the Fastify object-config style (`{ method, url, handler }`) is missed.
 
 10. **PRBL-C001 — Dict-literal credential detection** · `config = {"password": "hunter2"}` is not caught because the assignment pattern requires `=` syntax. A new pattern for string values inside dict literals where the key is a credential name would cover this common AI-generated config initialization pattern.
+
+11. **PRBL-R001 — Timing-safe comparison gap** *(sourced from Trail of Bits research — needs validation before implementing)* · Add a sub-pattern detecting direct `==` comparison on values in `mac`, `digest`, `hmac`, `signature`, `token` variable contexts in Python (should use `hmac.compare_digest()`) and JavaScript (should use `crypto.timingSafeEqual()`). ToB's constant-time-analysis skill documents this as a distinct vulnerability class across 12 languages; it is not currently captured by the RNG-source focus of PRBL-R001.
+
+12. **PRBL-A001 — Prototype pollution access control bypass** *(sourced from Trail of Bits research — needs validation before implementing)* · Add a sub-pattern detecting unsafe merge/assign of untrusted input (`req.body`, `req.query`) into plain objects — e.g. `Object.assign({}, req.body)`, custom recursive merge functions — where the result is used in an authorization check. ToB sharp-edges JS reference documents `{"__proto__": {"isAdmin": true}}` as a pre-authentication privilege escalation that bypasses all route-level auth indicators without touching a recognized auth pattern.
