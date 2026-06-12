@@ -26,7 +26,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:3001", "http://178.104.170.108"],
     allow_methods=["POST", "GET"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "X-Scan-Token", "X-Client-IP"],
 )
 
 LANGUAGE_MAP = {
@@ -112,22 +112,28 @@ _ip_hits: dict[str, list[float]] = defaultdict(list)
 @app.post("/scan", response_model=ScanResponse)
 def scan_repo(
     req: ScanRequest,
+    request: Request,
     x_scan_token: str = Header(default=""),
     x_client_ip: str = Header(default=""),
 ):
-    if SCAN_TOKEN and x_scan_token != SCAN_TOKEN:
+    if not SCAN_TOKEN:
+        raise HTTPException(status_code=503, detail="Scanner not configured")
+    if x_scan_token != SCAN_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    if x_client_ip:
+    # Use real socket IP for rate limiting; only trust X-Client-IP when the
+    # request already passed token auth (i.e. comes from our dashboard proxy).
+    real_ip = (request.client.host if request.client else None) or x_client_ip
+    if real_ip:
         now = _time.time()
-        hits = [t for t in _ip_hits[x_client_ip] if now - t < IP_WINDOW]
+        hits = [t for t in _ip_hits[real_ip] if now - t < IP_WINDOW]
         if len(hits) >= IP_LIMIT:
             raise HTTPException(
                 status_code=429,
                 detail="Rate limit reached — 5 free scans per hour. Sign up for more.",
             )
         hits.append(now)
-        _ip_hits[x_client_ip] = hits
+        _ip_hits[real_ip] = hits
     url = validate_github_url(req.repo_url)
     repo_name = "/".join(url.split("/")[-2:])
 
