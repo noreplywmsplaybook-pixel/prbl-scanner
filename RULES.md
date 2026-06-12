@@ -607,6 +607,7 @@ Categories and rankings follow the **OWASP Top 10 2021** revision (the current s
 |---|---|
 | PRBL-C001, PRBL-C002 | A07 — Identification and Authentication Failures |
 | PRBL-R001 | A04 — Insecure Design (Cryptographic Failures) |
+| PRBL-R002 | A02 — Cryptographic Failures |
 | PRBL-I001, PRBL-I002, PRBL-I003, PRBL-I004 | A05 — Injection |
 | PRBL-A001, PRBL-T001 | A01 — Broken Access Control |
 

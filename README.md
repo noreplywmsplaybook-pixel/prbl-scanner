@@ -21,6 +21,13 @@ how LLMs were trained, not because of developer mistakes.
   to generate tokens, session IDs, passwords, or OTPs. These functions
   are not cryptographically secure — their output is predictable.
 
+- **PRBL-R002** — Insecure equality comparison on security-critical value  
+  `CWE-208 · OWASP A02 · #2 most critical web security risk`  
+  Detects HMAC digests, webhook signatures, and verification tokens
+  compared with == or === instead of a constant-time comparison function.
+  String equality short-circuits on the first differing byte, allowing
+  timing attacks that reconstruct the expected value one byte at a time.
+
 - **PRBL-I001** — SQL injection including multi-line patterns  
   `CWE-89 · OWASP A05 · #5 most critical web security risk`  
   Detects user input concatenated or interpolated into SQL queries,
@@ -59,6 +66,7 @@ category give it the full context to answer accurately.
 |------|------|-----|------------|------------|
 | PRBL-C001 | Hardcoded Credentials | CWE-798 | A07 — Authentication Failures | #7 |
 | PRBL-R001 | Weak Randomness | CWE-338 | A04 — Cryptographic Failures | #4 |
+| PRBL-R002 | Insecure Equality Comparison | CWE-208 | A02 — Cryptographic Failures | #2 |
 | PRBL-I001 | SQL Injection | CWE-89 | A05 — Injection | #5 |
 | PRBL-I002 | Command Injection | CWE-78 | A05 — Injection | #5 |
 | PRBL-I003 | Code Injection | CWE-94/95 | A05 — Injection | #5 |
