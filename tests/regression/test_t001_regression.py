@@ -103,6 +103,74 @@ config = Path('/etc/app/config.json').read_text()
 
 # ── EASY FIX: C002 Django SECRET_KEY_BASE context ─────────────────────────────
 
+# ── PRBL-T001: shutil sinks (ITEM 6) ─────────────────────────────────────────
+
+def test_shutil_copy_user_input_fires():
+    """True positive: shutil.copy() with user-controlled src/dst fires T001."""
+    code = '''
+import shutil
+shutil.copy(request.args["src"], request.args["dst"])
+'''
+    findings = run(code, language='python', file_path='views.py')
+    assert any(f['rule_id'] == 'PRBL-T001' for f in findings), \
+        "PRBL-T001 must fire on shutil.copy with user input"
+
+
+def test_shutil_move_user_input_fires():
+    """True positive: shutil.move() with request.form path fires T001."""
+    code = '''
+import shutil
+def move_file(request):
+    shutil.move(request.form["path"], "/safe/destination")
+'''
+    findings = run(code, language='python', file_path='views.py')
+    assert any(f['rule_id'] == 'PRBL-T001' for f in findings), \
+        "PRBL-T001 must fire on shutil.move with user input"
+
+
+def test_shutil_rmtree_user_input_fires():
+    """True positive: shutil.rmtree() with os.path.join + user input fires T001."""
+    code = '''
+import shutil, os
+base_dir = "/uploads"
+shutil.rmtree(os.path.join(base_dir, request.args["folder"]))
+'''
+    findings = run(code, language='python', file_path='views.py')
+    assert any(f['rule_id'] == 'PRBL-T001' for f in findings), \
+        "PRBL-T001 must fire on shutil.rmtree with user input via os.path.join"
+
+
+def test_shutil_copy_static_not_flagged():
+    """True negative: shutil.copy() with literal paths must not fire T001."""
+    code = 'shutil.copy("config.json", "config.backup.json")'
+    findings = run(code, language='python', file_path='utils.py')
+    t001 = [f for f in findings if f['rule_id'] == 'PRBL-T001']
+    assert not t001, \
+        f"PRBL-T001 must not fire on shutil.copy with literal paths. Got: {t001}"
+
+
+def test_shutil_rmtree_static_not_flagged():
+    """True negative: shutil.rmtree() on a literal path must not fire T001."""
+    code = 'shutil.rmtree("/tmp/build")'
+    findings = run(code, language='python', file_path='utils.py')
+    t001 = [f for f in findings if f['rule_id'] == 'PRBL-T001']
+    assert not t001, \
+        f"PRBL-T001 must not fire on shutil.rmtree with literal path. Got: {t001}"
+
+
+def test_shutil_move_no_user_taint_not_flagged():
+    """True negative: shutil.move() with no traceable user taint must not fire."""
+    code = '''
+src_path = "/backups/file.tar"
+dst_path = "/archive/file.tar"
+shutil.move(src_path, dst_path)
+'''
+    findings = run(code, language='python', file_path='backup.py')
+    t001 = [f for f in findings if f['rule_id'] == 'PRBL-T001']
+    assert not t001, \
+        f"PRBL-T001 must not fire on shutil.move with no user taint. Got: {t001}"
+
+
 def test_c002_secret_key_base_fires():
     """True positive: SECRET_KEY_BASE with hardcoded value fires C002."""
     code = '''

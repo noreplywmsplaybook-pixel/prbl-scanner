@@ -75,6 +75,12 @@ _CRED_PATTERNS = [
     (r'(?i)(token|key|secret)\s*[=:]\s*["\'][0-9a-f]{32,}["\']', "Hardcoded hex token/key"),
     # JWT-shaped strings
     (r'eyJ[a-zA-Z0-9_-]{20,}\.eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}', "Hardcoded JWT"),
+    # Dict/object literal: {"password": "value"} or { secret: "value" }
+    # Catches Python dict and JS object literal syntax where a credential key maps to a literal string.
+    # Use [^"']{8,} — NOT .{8,} — to avoid matching across quote boundaries into comments.
+    (r'(?i)["\']?(?:password|passwd|pwd|secret|api_key|apikey|auth_token|access_token|private_key)["\']?'
+     r'\s*:\s*["\'](?!\$\{)(?!.*os\.environ)(?!.*process\.env)[^"\']{8,}["\']',
+     "Hardcoded credential in dict/object literal"),
 ]
 
 # Canonical jwt.io example JWT — the most widely copy-pasted JWT in existence.
@@ -98,8 +104,11 @@ _CRED_SAFE_CONTEXT = re.compile(
 # Safe variable name — if the *left side* of the assignment contains placeholder
 # language the value is intentionally fake. Check only the variable name, not the
 # value — "AKIAIOSFODNN7EXAMPLE" contains "example" but it's a real key format.
+# Also matches when the value itself (right side) contains placeholder/dummy language:
+#   access_token: "TOKEN_PLACEHOLDER_FOR_DELEGATION_CREDENTIAL"
 _CRED_SAFE_VARNAME = re.compile(
-    r'(?i)^[^=:]*?(placeholder|example[_\s]|your[_-]|dummy|fake|sample|test[_-]key|demo)',
+    r'(?i)(^[^=:]*?(placeholder|example[_\s]|your[_-]|dummy|fake|sample|test[_-]key|demo)'
+    r'|["\'][^"\']*(?:placeholder|_dummy|_fake|_example)[^"\']*["\'])',
 )
 
 # UI validation message exclusion — applied to the matched string *value*.
@@ -257,6 +266,13 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
                 string_values = _STRING_VALUE.findall(line)
                 if any(_CRED_VALIDATION_MSG.search(v) for v in string_values):
                     break
+                # Suppress C001 for session/cookie secrets — C002 covers these with
+                # better context and messaging. Avoids double-firing on:
+                #   app.use(session({ secret: 'hardcoded-value' }))
+                if description == "Hardcoded credential in dict/object literal":
+                    window_c002 = '\n'.join(lines[max(0, i - 6):min(len(lines), i + 2)])
+                    if _SESSION_CONTEXT.search(window_c002):
+                        break
                 findings.append(_match(
                     rule_id="PRBL-C001",
                     vuln_class="hardcoded_credentials",
@@ -542,6 +558,8 @@ _CODE_INJECTION_PATTERNS = [
     r'\bnew\s+Function\s*\(',
     r'(?i)__import__\s*\(',
     r'(?i)compile\s*\(.*exec',
+    # importlib.import_module() with user-controlled module name — AI-generated plugin loaders
+    r'(?i)importlib\.import_module\s*\(',
 ]
 
 
@@ -688,6 +706,12 @@ _DEMO_CONTENT_PATHS = [
 
 _ROUTE_PATTERNS = {
     "javascript": [
+        r'(?i)(app|router)\.(get|post|put|patch|delete)\s*\(\s*["\']',
+        # Fastify method-style: fastify.get('/path', handler)
+        r'(?i)fastify\.(route|get|post|put|patch|delete)\s*\(',
+        # Fastify object-config style: fastify.route({ method, url, handler })
+        r'(?i)(app|router)\.(route|get|post|put|patch|delete)\s*\(\s*\{',
+        # Hono: app.get('/path', handler) — same pattern as Express, explicit coverage
         r'(?i)(app|router)\.(get|post|put|patch|delete)\s*\(\s*["\']',
     ],
     "typescript": [
@@ -1220,7 +1244,8 @@ def check_session_secret(lines: list[str], language: str) -> list[RuleMatch]:
 _PATH_SINKS = re.compile(
     r'(?i)\b(sendFile|createReadStream|createWriteStream|readFile|readFileSync|'
     r'writeFile|writeFileSync|unlink|unlinkSync|open|send_file|send_from_directory|'
-    r'FileResponse|read_text|read_bytes|write_text|write_bytes)\s*\(',
+    r'FileResponse|read_text|read_bytes|write_text|write_bytes)\s*\('
+    r'|\bshutil\.(copy|move|rmtree)\s*\(',
 )
 # User input used in the sink argument: concatenation, template literal, f-string,
 # os.path.join with a request value
@@ -1276,11 +1301,11 @@ def check_path_traversal(lines: list[str], language: str) -> list[RuleMatch]:
 # ── Test-file detection ───────────────────────────────────────────────────────
 
 # Directory components that mark a file as test scaffolding
-_TEST_DIRS = {"test", "tests", "testing", "spec", "specs"}
+_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "__tests__", "__mocks__", "playwright", "e2e"}
 
 # Filename patterns that mark a file as a test (stem checks, not substring)
 _TEST_FILENAME = re.compile(
-    r'^(test_.+|.+_test|.+\.spec|.+\.test)$',
+    r'^(test_.+|.+_test|.+\.spec|.+\.test|.+\.e2e|.+\.e2e-spec)$',
     re.IGNORECASE,
 )
 

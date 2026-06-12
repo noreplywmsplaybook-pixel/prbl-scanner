@@ -2,7 +2,10 @@
 Kanakku (https://github.com/code-with-amitab/kanakku) — expected scanner findings.
 
 Captured: 2026-06-12
-Scanner version: post-precision-fixes (commit c8aaa54+)
+Scanner version: roadmap items 6-10 implemented (shutil sinks, importlib injection,
+                 Fastify routes, dict-literal credentials).
+E2E / playwright / __mocks__ directories treated as test scaffolding — findings
+in those paths are suppressed in non-production mode.
 Run with: PrblScanner(check_packages=False).scan_directory(...)
 
 These findings are the ground truth for the kanakku codebase.
@@ -40,17 +43,10 @@ EXPECTED_FINDINGS = [
     {"rule_id": "PRBL-C001", "severity": "high",
      "file_suffix": "banktransactions/tools/update_test_password.py"},
 
-    # frontend/e2e/utils/test-utils.js:13 — hardcoded credential (high)
-    {"rule_id": "PRBL-C001", "severity": "high",
-     "file_suffix": "frontend/e2e/utils/test-utils.js"},
-
-    # frontend/e2e/utils/test-utils.js:35 — hardcoded credential (high)
-    {"rule_id": "PRBL-C001", "severity": "high",
-     "file_suffix": "frontend/e2e/utils/test-utils.js"},
-
-    # frontend/e2e/utils/test-utils.js:36 — hardcoded credential (high)
-    {"rule_id": "PRBL-C001", "severity": "high",
-     "file_suffix": "frontend/e2e/utils/test-utils.js"},
+    # NOTE: frontend/e2e/utils/test-utils.js was previously counted here (3 findings).
+    # These are now suppressed because frontend/e2e/ is recognized as a test directory.
+    # E2E credential fixtures (password='Password123!') are test scaffolding, not
+    # production secrets. The suppression prevents noise in E2E test code reviews.
 ]
 
-EXPECTED_TOTAL = len(EXPECTED_FINDINGS)  # 10
+EXPECTED_TOTAL = len(EXPECTED_FINDINGS)  # 7

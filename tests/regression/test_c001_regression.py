@@ -121,6 +121,59 @@ def test_env_var_reference_not_flagged():
     assert not c001, "PRBL-C001 must not fire on process.env reference"
 
 
+# ── PRBL-C001: Dict/object literal credential patterns (ITEM 10) ─────────────
+
+def test_python_dict_password_fires():
+    """True positive: Python dict literal with hardcoded password fires C001."""
+    code = '''config = {"password": "hunter2secret", "host": "localhost"}'''
+    findings = run(code, language='python', file_path='config.py')
+    assert any(f['rule_id'] == 'PRBL-C001' for f in findings), \
+        "PRBL-C001 must fire on Python dict literal with hardcoded password"
+
+
+def test_python_dict_secret_fires():
+    """True positive: Python dict literal with hardcoded secret fires C001."""
+    code = '''db_config = {"secret": "my-secret-key-123456", "port": 5432}'''
+    findings = run(code, language='python', file_path='db.py')
+    assert any(f['rule_id'] == 'PRBL-C001' for f in findings), \
+        "PRBL-C001 must fire on Python dict literal with hardcoded secret"
+
+
+def test_js_object_password_fires():
+    """True positive: JS object literal with hardcoded password fires C001."""
+    code = """const config = { password: "hunter2secret123", apiKey: "abc123secret" }"""
+    findings = run(code, file_path='config.js')
+    assert any(f['rule_id'] == 'PRBL-C001' for f in findings), \
+        "PRBL-C001 must fire on JS object literal with hardcoded password"
+
+
+def test_dict_env_var_not_flagged():
+    """True negative: dict with os.environ reference must not fire C001."""
+    code = '''config = {"password": os.environ["DB_PASSWORD"]}'''
+    findings = run(code, language='python', file_path='config.py')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, \
+        f"PRBL-C001 must not fire when dict value is os.environ reference. Got: {c001}"
+
+
+def test_dict_validation_message_not_flagged():
+    """True negative: dict with validation message value must not fire C001."""
+    code = '''errors = {"password": "is required"}'''
+    findings = run(code, language='python', file_path='forms.py')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, \
+        f"PRBL-C001 must not fire on dict with validation message. Got: {c001}"
+
+
+def test_dict_placeholder_name_not_flagged():
+    """True negative: dict key containing 'your-password' placeholder must not fire."""
+    code = '''hints = {"your-password": "..."}'''
+    findings = run(code, language='python', file_path='help.py')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, \
+        f"PRBL-C001 must not fire on placeholder variable name. Got: {c001}"
+
+
 def test_python_environ_not_flagged():
     """True negative: os.environ reference must never fire C001."""
     code = "api_key = os.environ.get('API_KEY')"

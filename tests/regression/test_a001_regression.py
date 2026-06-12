@@ -196,6 +196,79 @@ router.get('/products/:id/similar', async (req, res) => {
             f"/:id/similar product route should not fire HIGH. Got: {a001[0]['severity']}"
 
 
+# ── PRBL-A001: Fastify route patterns (ITEM 9) ───────────────────────────────
+
+def test_fastify_get_no_auth_fires():
+    """True positive: fastify.get() with sensitive op and no auth fires A001."""
+    code = '''
+fastify.get('/users', async (req, reply) => {
+  const users = await db.find({})
+  reply.send(users)
+})
+'''
+    findings = run(code)
+    assert any(f['rule_id'] == 'PRBL-A001' for f in findings), \
+        "PRBL-A001 must fire on fastify.get with sensitive op and no auth"
+
+
+def test_fastify_route_object_config_no_auth_fires():
+    """True positive: fastify.route({method, url, handler}) with no auth fires A001."""
+    code = '''
+fastify.route({
+  method: 'GET',
+  url: '/admin/users',
+  handler: async (req, reply) => {
+    const users = await User.findAll()
+    reply.send(users)
+  }
+})
+'''
+    findings = run(code)
+    assert any(f['rule_id'] == 'PRBL-A001' for f in findings), \
+        "PRBL-A001 must fire on fastify.route() object-config with no auth"
+
+
+def test_fastify_post_with_auth_not_flagged():
+    """True negative: fastify.post() with auth middleware must not fire A001."""
+    code = '''
+fastify.addHook('preHandler', authenticate)
+fastify.post('/users', async (req, reply) => {
+  const user = await User.create(req.body)
+  reply.send(user)
+})
+'''
+    findings = run(code)
+    a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
+    assert not a001, \
+        f"PRBL-A001 must not fire when auth hook is present. Got: {a001}"
+
+
+def test_fastify_health_route_not_flagged():
+    """True negative: fastify.get('/health', handler) must not fire A001."""
+    code = '''
+fastify.get('/health', async (req, reply) => {
+  reply.send({ status: 'ok' })
+})
+'''
+    findings = run(code)
+    a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
+    assert not a001, \
+        f"PRBL-A001 must not fire on fastify /health route. Got: {a001}"
+
+
+def test_fastify_login_route_not_flagged():
+    """True negative: fastify.get('/login', handler) must not fire A001."""
+    code = '''
+fastify.get('/login', async (req, reply) => {
+  reply.send({ message: 'login page' })
+})
+'''
+    findings = run(code)
+    a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
+    assert not a001, \
+        f"PRBL-A001 must not fire on fastify /login route. Got: {a001}"
+
+
 def test_permission_classes_class_level_recognized():
     """Regression: permission_classes at class level (60-line lookback) recognized."""
     code = '''

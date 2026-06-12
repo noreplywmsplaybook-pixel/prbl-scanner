@@ -94,7 +94,7 @@ Affected paths (case-insensitive): `remotion/`, files named `HeroAnimation`, `He
 - Ruby constants (`API_KEY = "sk_live_..."`) — same language-scope gap. (OUT OF SCOPE.)
 - Ruby `ENV.fetch('SECRET_KEY', 'fallback-value')` fallback pattern — ToB insecure-defaults research shows this is a common Rails pattern equivalent to the Python `os.getenv(x, default)` antipattern already detected; requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
 - Java `System.getenv().getOrDefault("DB_PASSWORD", "hardcoded")` fallback — ToB insecure-defaults examples flag this as an equivalent credential exposure pattern; requires Java language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
-- The generic assignment pattern requires `=` syntax; it will miss Python dict-literal secrets like `config = {"password": "hunter2"}` unless the dict key matches a recognized name near an `=`. (MEDIUM — dict-literal pattern would need a new sub-pattern.)
+- ~~The generic assignment pattern requires `=` syntax; it will miss Python dict-literal secrets like `config = {"password": "hunter2"}` unless the dict key matches a recognized name near an `=`.~~ **Fixed (roadmap item 10):** Dict/object-literal pattern added. `{"password": "hunter2"}` is now detected in both Python and JavaScript.
 
 ---
 
@@ -297,7 +297,7 @@ Uses the same taint-source logic as PRBL-I001.
 
 #### Known Limitations
 
-**Covered:** Bare `eval()`, `exec()`, `new Function()`, `__import__()`, `compile(..., 'exec')` — with user taint. Method calls on other objects (`.eval()`, `.exec()`) are correctly excluded.
+**Covered:** Bare `eval()`, `exec()`, `new Function()`, `__import__()`, `compile(..., 'exec')`, `importlib.import_module()` — with user taint. Method calls on other objects (`.eval()`, `.exec()`) are correctly excluded.
 
 **Not covered:**
 - Ruby's `eval`, `instance_eval`, `class_eval` — Ruby is out of scope. (OUT OF SCOPE.)
@@ -305,7 +305,7 @@ Uses the same taint-source logic as PRBL-I001.
 - Ruby `user_input.constantize` (Rails) and `Object.const_get(user_input)` — ToB sharp-edges Ruby reference identifies these Rails helpers as code execution paths; arbitrary class instantiation. Requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
 - Ruby `YAML.load(user_input)` — ToB sharp-edges Ruby reference documents this as an RCE vector (gadget chains via arbitrary object deserialization, as exploited in CVE-2013-0156). Distinct from `eval` but achieves the same result; safe alternative is `YAML.safe_load`. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
 - PHP's `eval()` — PHP is out of scope. (OUT OF SCOPE.)
-- Python `importlib.import_module(user_input)` — a less common but equivalent code-injection vector. (MEDIUM — add `import_module` to the pattern list.)
+- ~~Python `importlib.import_module(user_input)` — a less common but equivalent code-injection vector.~~ **Fixed (roadmap item 7):** `importlib.import_module()` with user taint is now detected as PRBL-I003.
 - JavaScript `Function` constructor via indirect reference (e.g. `(0, eval)(input)` or `window['eval'](input)`) — these obfuscated forms are not detected, but they're vanishingly rare in AI-generated code. (Acceptable tradeoff.)
 
 ---
@@ -425,7 +425,7 @@ Reports **at most one finding per file** to avoid inflating counts when the same
 
 #### Known Limitations
 
-**Covered:** Express, Flask, Django, FastAPI, NestJS route patterns and Next.js / Vercel / Netlify / AWS Lambda serverless handler exports. A wide range of auth middleware names, decorator patterns, and inline auth function calls.
+**Covered:** Express, Fastify, Flask, Django, FastAPI, NestJS route patterns and Next.js / Vercel / Netlify / AWS Lambda serverless handler exports. A wide range of auth middleware names, decorator patterns, and inline auth function calls. Fastify-specific patterns include `fastify.get()`, `fastify.post()`, `fastify.route()`, and object-config style `fastify.route({ method, url, handler })`.
 
 **Not covered:**
 - Rails controllers (`def show; @user = User.find(params[:id]); end`) — Ruby is out of scope. (OUT OF SCOPE.)
@@ -433,7 +433,7 @@ Reports **at most one finding per file** to avoid inflating counts when the same
 - Go `net/http` handler functions (`func(w http.ResponseWriter, r *http.Request)`) — Go is out of scope. (OUT OF SCOPE.)
 - JavaScript prototype pollution as an access control bypass — ToB sharp-edges JS reference documents `{"__proto__": {"isAdmin": true}}` passed to merge/assign utilities as an authentication bypass that bypasses route-level auth entirely without touching any recognized auth pattern. Not an access-control gap in the route-detection sense, but a pre-auth privilege escalation; no current Prbl rule covers this. (MEDIUM — would need a new sub-pattern detecting unsafe merge/assign of untrusted objects into plain JS objects; sourced from Trail of Bits research — needs validation before implementing.)
 - GraphQL resolvers (e.g. Apollo Server `resolvers.Query.user`) — no route-pattern match for resolver objects; the taint/sensitive-operation logic could fire but the route-detection gate doesn't recognize resolver function signatures. (MEDIUM — add resolver function signature detection.)
-- Hono, Fastify, Koa, and other Node.js frameworks not in the pattern list — routes like `app.get(...)` already match via the generic Express pattern, but framework-specific patterns (e.g. Fastify `fastify.route({ method, url, handler })`) would be missed. (MEDIUM — expand route pattern list.)
+- ~~Hono, Fastify, Koa, and other Node.js frameworks not in the pattern list — routes like `app.get(...)` already match via the generic Express pattern, but framework-specific patterns (e.g. Fastify `fastify.route({ method, url, handler })`) would be missed.~~ **Fixed (roadmap item 9):** Fastify `fastify.get()`, `fastify.post()`, `fastify.route()`, and object-config style `fastify.route({ method, url, handler })` are now detected.
 
 ---
 
@@ -443,7 +443,7 @@ Reports **at most one finding per file** to avoid inflating counts when the same
 
 Detects user-controlled input used to build filesystem paths passed to file operation functions.
 
-**Sink functions:** `sendFile`, `createReadStream`, `createWriteStream`, `readFile`, `readFileSync`, `writeFile`, `writeFileSync`, `unlink`, `unlinkSync`, `open`, `send_file`, `send_from_directory`, `FileResponse`.
+**Sink functions:** `sendFile`, `createReadStream`, `createWriteStream`, `readFile`, `readFileSync`, `writeFile`, `writeFileSync`, `unlink`, `unlinkSync`, `open`, `send_file`, `send_from_directory`, `FileResponse`, `read_text`, `read_bytes`, `write_text`, `write_bytes`, `shutil.copy`, `shutil.move`, `shutil.rmtree`.
 
 **Taint on the sink line:** the function call must include user input directly: `req.params`, `req.query`, `req.body`, `request.args`, `request.form`, template literals `${`, f-strings `f"`, string concatenation `+ var`, or `os.path.join`.
 
@@ -457,12 +457,12 @@ Input like `../../etc/passwd` or `..\\..\\.env` escapes the intended directory a
 
 #### Known Limitations
 
-**Covered:** Node.js `fs` module functions (`readFile`, `readFileSync`, `createReadStream`, `createWriteStream`, `writeFile`, `writeFileSync`, `unlink`, `unlinkSync`), Express `res.sendFile()`, Flask `send_file()` / `send_from_directory()`, FastAPI `FileResponse()`, Python `open()`, and now pathlib `read_text()` / `read_bytes()` / `write_text()` / `write_bytes()`.
+**Covered:** Node.js `fs` module functions (`readFile`, `readFileSync`, `createReadStream`, `createWriteStream`, `writeFile`, `writeFileSync`, `unlink`, `unlinkSync`), Express `res.sendFile()`, Flask `send_file()` / `send_from_directory()`, FastAPI `FileResponse()`, Python `open()`, pathlib `read_text()` / `read_bytes()` / `write_text()` / `write_bytes()`, and Python `shutil.copy()` / `shutil.move()` / `shutil.rmtree()`.
 
 **Not covered:**
 - Go's `os.Open(path)` — Go is out of scope. (OUT OF SCOPE.)
 - Rails `send_file(params[:filename])` — ToB sharp-edges Ruby reference identifies `send_file` with user-controlled params as a direct path traversal pattern; requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
-- Python `shutil.copy(src, dst)` and `shutil.move(src, dst)` with user-controlled paths — `shutil` functions are not in the sink list. (MEDIUM — add `shutil.copy`, `shutil.move`, `shutil.rmtree` as sinks.)
+- ~~Python `shutil.copy(src, dst)` and `shutil.move(src, dst)` with user-controlled paths — `shutil` functions are not in the sink list.~~ **Fixed (roadmap item 6):** `shutil.copy`, `shutil.move`, and `shutil.rmtree` are now path traversal sinks, guarded by the same taint and sanitization checks as other sinks.
 - `pathlib.Path(user_input)` passed to functions that are not sinks themselves (e.g. a custom file-serving utility that takes a `Path` object) — multi-hop taint tracking is beyond the current regex model. (Acceptable tradeoff.)
 
 ---
@@ -533,16 +533,8 @@ Prioritized MEDIUM items from the Known Limitations analysis above. Sorted by es
 
 1. **PRBL-A001 — GraphQL resolver function signature detection** · AI-generated GraphQL backends (Apollo Server, Strawberry, Ariadne) are common and never have route declarations in the Express/Flask sense. A resolver-function pattern like `resolvers.Query.someField = (_, args) =>` performing a DB operation with no auth check is a real PRBL-A001 gap with meaningful frequency.
 
-2. **PRBL-T001 — `shutil` sinks** · Add `shutil.copy`, `shutil.move`, `shutil.rmtree` as path traversal sinks for Python. These are destructive file operations and are commonly generated without sanitization in file-management utilities.
+2. **PRBL-P001 — Private registry allow-list** · Add a configurable list of package name prefixes that should skip the registry check (e.g. `@mycompany/`). Reduces noise for teams with private registries without disabling the rule entirely.
 
-3. **PRBL-I003 — `importlib.import_module(user_input)`** · Add `import_module(` to code injection patterns. Less common than `eval`/`exec`, but AI-generated plugin-loader code sometimes generates this pattern with user-controlled module names.
-
-4. **PRBL-P001 — Private registry allow-list** · Add a configurable list of package name prefixes that should skip the registry check (e.g. `@mycompany/`). Reduces noise for teams with private registries without disabling the rule entirely.
-
-5. **PRBL-A001 — Fastify / Hono / Koa route patterns** · Expand `_ROUTE_PATTERNS["javascript"]` with Fastify's `fastify.route()` / `fastify.get()` and Hono's `app.get()`. These already partially work via the generic Express pattern but the Fastify object-config style (`{ method, url, handler }`) is missed.
-
-6. **PRBL-C001 — Dict-literal credential detection** · `config = {"password": "hunter2"}` is not caught because the assignment pattern requires `=` syntax. A new pattern for string values inside dict literals where the key is a credential name would cover this common AI-generated config initialization pattern.
-
-7. **PRBL-R001 — Timing-safe comparison gap** *(sourced from Trail of Bits research — needs validation before implementing)* · Add a sub-pattern detecting direct `==` comparison on values in `mac`, `digest`, `hmac`, `signature`, `token` variable contexts in Python (should use `hmac.compare_digest()`) and JavaScript (should use `crypto.timingSafeEqual()`). ToB's constant-time-analysis skill documents this as a distinct vulnerability class across 12 languages; it is not currently captured by the RNG-source focus of PRBL-R001.
+3. **PRBL-R001 — Timing-safe comparison gap** *(sourced from Trail of Bits research — needs validation before implementing)* · Add a sub-pattern detecting direct `==` comparison on values in `mac`, `digest`, `hmac`, `signature`, `token` variable contexts in Python (should use `hmac.compare_digest()`) and JavaScript (should use `crypto.timingSafeEqual()`). ToB's constant-time-analysis skill documents this as a distinct vulnerability class across 12 languages; it is not currently captured by the RNG-source focus of PRBL-R001.
 
 12. **PRBL-A001 — Prototype pollution access control bypass** *(sourced from Trail of Bits research — needs validation before implementing)* · Add a sub-pattern detecting unsafe merge/assign of untrusted input (`req.body`, `req.query`) into plain objects — e.g. `Object.assign({}, req.body)`, custom recursive merge functions — where the result is used in an authorization check. ToB sharp-edges JS reference documents `{"__proto__": {"isAdmin": true}}` as a pre-authentication privilege escalation that bypasses all route-level auth indicators without touching a recognized auth pattern.

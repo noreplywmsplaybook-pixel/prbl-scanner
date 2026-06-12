@@ -64,6 +64,61 @@ def test_regex_exec_not_flagged():
         f"PRBL-I003 must not fire on regex .exec(). Got: {i003}"
 
 
+# ── PRBL-I003: importlib.import_module() code injection (ITEM 7) ──────────────
+
+def test_importlib_user_controlled_fires():
+    """True positive: importlib.import_module() with user-controlled input fires I003."""
+    code = '''
+import importlib
+module = importlib.import_module(request.args["plugin"])
+'''
+    findings = run(code, language='python', file_path='loader.py')
+    assert any(f['rule_id'] == 'PRBL-I003' for f in findings), \
+        "PRBL-I003 must fire on importlib.import_module with request.args input"
+
+
+def test_importlib_user_input_variable_fires():
+    """True positive: importlib.import_module(user_input) fires I003."""
+    code = '''
+import importlib
+def load_plugin(user_input):
+    plugin = importlib.import_module(user_input)
+'''
+    findings = run(code, language='python', file_path='loader.py')
+    assert any(f['rule_id'] == 'PRBL-I003' for f in findings), \
+        "PRBL-I003 must fire on importlib.import_module with function parameter taint"
+
+
+def test_importlib_form_input_fires():
+    """True positive: importlib.import_module() with form input fires I003."""
+    code = '''
+import importlib
+plugin_name = request.form.get("plugin")
+mod = importlib.import_module(plugin_name)
+'''
+    findings = run(code, language='python', file_path='api.py')
+    assert any(f['rule_id'] == 'PRBL-I003' for f in findings), \
+        "PRBL-I003 must fire on importlib.import_module with request.form taint"
+
+
+def test_importlib_literal_string_not_flagged():
+    """True negative: importlib.import_module('myapp.models') must not fire."""
+    code = 'importlib.import_module("myapp.models")'
+    findings = run(code, language='python', file_path='utils.py')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert not i003, \
+        f"PRBL-I003 must not fire on importlib.import_module with literal string. Got: {i003}"
+
+
+def test_importlib_config_setting_not_flagged():
+    """True negative: importlib.import_module(settings.PLUGIN_MODULE) must not fire."""
+    code = 'importlib.import_module(settings.PLUGIN_MODULE)'
+    findings = run(code, language='python', file_path='config.py')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert not i003, \
+        f"PRBL-I003 must not fire on importlib.import_module with settings config. Got: {i003}"
+
+
 def test_arbitrary_method_eval_not_flagged():
     """Regression: anyObject.eval() must not fire I003."""
     code = "vm.eval(code)"
