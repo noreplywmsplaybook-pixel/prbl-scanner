@@ -159,7 +159,19 @@ def scan_repo(
         )
         clone_url = None
         if result.returncode != 0:
-            # result.stderr may contain the tokenized URL — never include it here
+            # result.stderr may contain the tokenized URL — never include it here.
+            # Distinguish common failure modes so callers can react appropriately.
+            stderr_lower = result.stderr.lower() if result.stderr else ""
+            if "repository not found" in stderr_lower or "not found" in stderr_lower:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Repository not found. Check the URL and ensure it is public (or that you have authorized access)."
+                )
+            if "authentication failed" in stderr_lower or "could not read username" in stderr_lower or "invalid credentials" in stderr_lower:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Authentication failed. For private repos, make sure your GitHub authorization grants repo access."
+                )
             raise HTTPException(
                 status_code=422,
                 detail="Could not clone repository. Check the URL, and for private repos make sure your GitHub authorization grants repo access."
@@ -231,7 +243,7 @@ def scan_repo(
     except HTTPException:
         raise
     except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Repository clone timed out. Try a smaller repo.")
+        raise HTTPException(status_code=408, detail="Repository clone timed out. Try a smaller repo.")
     except Exception as e:
         # Redact the token if any exception message happens to embed it
         msg = str(e)
