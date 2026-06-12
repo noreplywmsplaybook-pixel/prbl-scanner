@@ -497,7 +497,7 @@ _SQL_CONTEXT_SIGNALS = re.compile(
     r'|\.prepare\s*\(|\.all\s*\(|\.run\s*\('            # sqlite3 / better-sqlite3
     r'|\bquery\b|\bexecute\b|\bcursor\b'                 # variable / method names
     r'|\bpool\b|\bdb\b|\bconn\b|\bconnection\b'          # DB handle names
-    r'|knex|sequelize|prisma|mongoose|typeorm|pg\.|mysql' # ORM/driver names
+    r'|knex|sequelize|prisma|typeorm|pg\.|mysql'          # ORM/driver names (mongoose excluded — NoSQL, not SQL)
     r'|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b'     # SQL keywords (word-bounded)
     r'|\bFROM\b|\bWHERE\b|\bJOIN\b|\bINTO\b'
     r')'
