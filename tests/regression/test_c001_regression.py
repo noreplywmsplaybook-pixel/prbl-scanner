@@ -180,3 +180,127 @@ def test_python_environ_not_flagged():
     findings = run(code, language='python', file_path='config.py')
     c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
     assert not c001, "PRBL-C001 must not fire on os.environ reference"
+
+
+# ── PRBL-C001: Python or-fallback pattern (_FALLBACK_PY_OR) ──────────────────
+
+def test_py_or_fallback_secret_key_fires():
+    """True positive: os.environ.get('SECRET_KEY') or 'dev-secret' fires C001."""
+    code = "SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key'"
+    findings = run(code, language='python', file_path='settings.py')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert c001, "PRBL-C001 must fire on os.environ.get(...) or 'literal' with credential var name"
+
+
+def test_py_or_fallback_jwt_secret_fires():
+    """True positive: os.getenv('JWT_SECRET') or 'supersecret' fires C001."""
+    code = "JWT_SECRET = os.getenv('JWT_SECRET') or 'supersecret'"
+    findings = run(code, language='python', file_path='config.py')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert c001, "PRBL-C001 must fire on os.getenv(...) or 'literal' with jwt_secret"
+
+
+def test_py_or_fallback_with_none_sentinel_fires():
+    """True positive: os.environ.get('API_KEY', None) or 'hardcoded-api-key' fires C001."""
+    code = "API_KEY = os.environ.get('API_KEY', None) or 'hardcoded-api-key'"
+    findings = run(code, language='python', file_path='config.py')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert c001, "PRBL-C001 must fire on os.environ.get('KEY', None) or 'literal'"
+
+
+def test_py_or_fallback_debug_not_flagged():
+    """True negative: os.environ.get('DEBUG') or 'false' — 'false' is safe value."""
+    code = "DEBUG = os.environ.get('DEBUG') or 'false'"
+    findings = run(code, language='python', file_path='config.py')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on DEBUG with 'false' fallback. Got: {c001}"
+
+
+def test_py_or_fallback_log_level_not_flagged():
+    """True negative: os.environ.get('LOG_LEVEL') or 'INFO' — non-credential name + safe value."""
+    code = "LOG_LEVEL = os.environ.get('LOG_LEVEL') or 'INFO'"
+    findings = run(code, language='python', file_path='config.py')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on LOG_LEVEL with 'INFO' fallback. Got: {c001}"
+
+
+def test_py_or_fallback_port_not_flagged():
+    """True negative: os.getenv('PORT') or '3000' — '3000' matches _FALLBACK_SAFE_VALUE (digits only)."""
+    code = "PORT = os.getenv('PORT') or '3000'"
+    findings = run(code, language='python', file_path='config.py')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on PORT with '3000' fallback. Got: {c001}"
+
+
+def test_py_or_fallback_localhost_not_flagged():
+    """True negative: os.getenv('DB_HOST') or 'localhost' — non-credential name + safe value."""
+    code = "DB_HOST = os.getenv('DB_HOST') or 'localhost'"
+    findings = run(code, language='python', file_path='config.py')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on DB_HOST with 'localhost' fallback. Got: {c001}"
+
+
+def test_py_or_fallback_workers_not_flagged():
+    """True negative: os.environ.get('WORKERS') or '4' — WORKERS is not a credential name."""
+    code = "WORKERS = os.environ.get('WORKERS') or '4'"
+    findings = run(code, language='python', file_path='config.py')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on WORKERS. Got: {c001}"
+
+
+# ── PRBL-C001: JS/TS destructuring default (_FALLBACK_JS_DESTRUCT) ────────────
+
+def test_js_destruct_jwt_secret_fires():
+    """True positive: const { JWT_SECRET = 'my-hardcoded-secret' } = process.env fires C001."""
+    code = "const { JWT_SECRET = 'my-hardcoded-secret' } = process.env"
+    findings = run(code, language='javascript', file_path='config.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert c001, "PRBL-C001 must fire on JS destructuring with credential var name"
+
+
+def test_js_destruct_session_secret_fires():
+    """True positive: const { SESSION_SECRET = 'default-session' } = process.env fires C001."""
+    code = "const { SESSION_SECRET = 'default-session' } = process.env"
+    findings = run(code, language='javascript', file_path='server.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert c001, "PRBL-C001 must fire on SESSION_SECRET destructuring default"
+
+
+def test_js_destruct_api_key_fires():
+    """True positive: const { API_KEY = 'hardcoded-key-value' } = process.env fires C001."""
+    code = "const { API_KEY = 'hardcoded-key-value' } = process.env"
+    findings = run(code, language='typescript', file_path='config.ts')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert c001, "PRBL-C001 must fire on API_KEY destructuring default"
+
+
+def test_js_destruct_port_not_flagged():
+    """True negative: const { PORT = '3000' } = process.env — PORT not a credential name."""
+    code = "const { PORT = '3000' } = process.env"
+    findings = run(code, language='javascript', file_path='server.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on PORT destructuring. Got: {c001}"
+
+
+def test_js_destruct_node_env_not_flagged():
+    """True negative: const { NODE_ENV = 'development' } = process.env — not a credential."""
+    code = "const { NODE_ENV = 'development' } = process.env"
+    findings = run(code, language='javascript', file_path='app.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on NODE_ENV destructuring. Got: {c001}"
+
+
+def test_js_destruct_placeholder_not_flagged():
+    """True negative: const { JWT_SECRET = 'your-secret-here' } = process.env — safe placeholder."""
+    code = "const { JWT_SECRET = 'your-secret-here' } = process.env"
+    findings = run(code, language='javascript', file_path='config.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on 'your-*' placeholder. Got: {c001}"
+
+
+def test_js_destruct_debug_not_flagged():
+    """True negative: const { DEBUG = 'false' } = process.env — DEBUG not credential, 'false' is safe."""
+    code = "const { DEBUG = 'false' } = process.env"
+    findings = run(code, language='javascript', file_path='app.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on DEBUG destructuring. Got: {c001}"

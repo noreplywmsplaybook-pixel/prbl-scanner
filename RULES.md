@@ -59,15 +59,24 @@ Also matches well-known credential formats regardless of variable name:
 Detects the AI-generated antipattern where a working fallback value is provided for a missing environment variable:
 
 ```javascript
-// JS/TS
+// JS/TS — or/nullish-coalescing
 const secret = process.env.JWT_SECRET || 'my-secret-key'
 const secret = process.env.JWT_SECRET ?? 'my-secret-key'
+
+// JS/TS — single-variable destructuring with default
+const { JWT_SECRET = 'my-secret-key' } = process.env
+const { SESSION_SECRET = 'default-session-secret' } = process.env
 ```
 
 ```python
-# Python
+# Python — comma-argument form
 secret = os.environ.get('JWT_SECRET', 'my-secret-key')
 secret = os.getenv('JWT_SECRET', 'my-secret-key')
+
+# Python — or-fallback form (also with optional None sentinel)
+secret = os.environ.get('JWT_SECRET') or 'my-secret-key'
+secret = os.getenv('JWT_SECRET') or 'my-secret-key'
+secret = os.environ.get('JWT_SECRET', None) or 'my-secret-key'
 ```
 
 This is the most common AI-generated credential mistake. The app works locally, the developer ships it, and every deployment that doesn't explicitly set the environment variable gets a known, predictable production secret.
@@ -86,7 +95,7 @@ Affected paths (case-insensitive): `remotion/`, files named `HeroAnimation`, `He
 
 #### Known Limitations
 
-**Covered:** Python source files (`.py`) and JavaScript/TypeScript source files (`.js`, `.ts`, `.jsx`, `.tsx`). The six generic assignment patterns, all well-known credential formats (Stripe, AWS, GitHub), and the JS/Python env-var fallback antipattern.
+**Covered:** Python source files (`.py`) and JavaScript/TypeScript source files (`.js`, `.ts`, `.jsx`, `.tsx`). The six generic assignment patterns, all well-known credential formats (Stripe, AWS, GitHub), and four env-var fallback forms: JS `||`/`??`, JS single-variable destructuring default (`const { KEY = 'val' } = process.env`), Python comma-argument (`os.getenv('KEY', 'val')`), and Python or-fallback (`os.getenv('KEY') or 'val'`).
 
 **Not covered:**
 - Config files (YAML, JSON, TOML, `.env`) — the scanner receives source code, not config; secrets in `config/database.yml` or `docker-compose.yml` are out of scope. (OUT OF SCOPE for this scanner; a dedicated secrets-in-config tool is the right instrument.)

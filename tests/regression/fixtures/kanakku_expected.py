@@ -2,8 +2,8 @@
 Kanakku (https://github.com/code-with-amitab/kanakku) — expected scanner findings.
 
 Captured: 2026-06-12
-Scanner version: roadmap items 6-10 implemented (shutil sinks, importlib injection,
-                 Fastify routes, dict-literal credentials).
+Scanner version: Python or-fallback (_FALLBACK_PY_OR) and JS destructuring-default
+                 (_FALLBACK_JS_DESTRUCT) patterns added to PRBL-C001.
 E2E / playwright / __mocks__ directories treated as test scaffolding — findings
 in those paths are suppressed in non-production mode.
 Run with: PrblScanner(check_packages=False).scan_directory(...)
@@ -15,6 +15,10 @@ To re-capture: run tests/regression/fixtures/rerun_kanakku.py
 """
 
 EXPECTED_FINDINGS = [
+    # adminserver/config/dashboard_config.py:16 — or-fallback DASHBOARD_SECRET_KEY (medium)
+    {"rule_id": "PRBL-C001", "severity": "medium",
+     "file_suffix": "adminserver/config/dashboard_config.py"},
+
     # adminserver/config/dashboard_config.py:124 — hardcoded credential (medium)
     {"rule_id": "PRBL-C001", "severity": "medium",
      "file_suffix": "adminserver/config/dashboard_config.py"},
@@ -25,6 +29,14 @@ EXPECTED_FINDINGS = [
 
     # backend/app/config.py:100 — session secret (high)
     {"rule_id": "PRBL-C002", "severity": "high",
+     "file_suffix": "backend/app/config.py"},
+
+    # backend/app/config.py:11 — or-fallback SECRET_KEY (medium)
+    {"rule_id": "PRBL-C001", "severity": "medium",
+     "file_suffix": "backend/app/config.py"},
+
+    # backend/app/config.py:20 — or-fallback JWT_SECRET_KEY (medium)
+    {"rule_id": "PRBL-C001", "severity": "medium",
      "file_suffix": "backend/app/config.py"},
 
     # banktransactions/tests/test_core/test_email_parser.py:13 — hallucinated package (high)
@@ -49,4 +61,4 @@ EXPECTED_FINDINGS = [
     # production secrets. The suppression prevents noise in E2E test code reviews.
 ]
 
-EXPECTED_TOTAL = len(EXPECTED_FINDINGS)  # 7
+EXPECTED_TOTAL = len(EXPECTED_FINDINGS)  # 10

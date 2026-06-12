@@ -145,6 +145,15 @@ _FALLBACK_JS = re.compile(
 _FALLBACK_PY = re.compile(
     r'os\.(?:environ\.get|getenv)\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']+)["\']',
 )
+# Python: os.environ.get('KEY') or 'literal'  /  os.getenv('KEY') or 'literal'
+# Also handles the optional None sentinel: os.environ.get('KEY', None) or 'literal'
+_FALLBACK_PY_OR = re.compile(
+    r'os\.(?:environ\.get|getenv)\s*\(\s*["\']([^"\']+)["\'](?:\s*,\s*None)?\s*\)\s*or\s*["\']([^"\']+)["\']'
+)
+# JS/TS: const { JWT_SECRET = 'default' } = process.env  (single-variable only)
+_FALLBACK_JS_DESTRUCT = re.compile(
+    r'(?:const|let|var)\s*\{\s*(\w+)\s*=\s*["\']([^"\']+)["\']\s*\}\s*=\s*process\.env'
+)
 
 # Values that are NOT credentials: empty, None/null/undefined, booleans, pure numbers, URLs
 _FALLBACK_SAFE_VALUE = re.compile(
@@ -194,16 +203,22 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
         # intentionally contain process.env / os.environ and would otherwise be
         # whitelisted. These patterns are unambiguous enough not to need the guard.
         fallback_found = False
-        for regex in (_FALLBACK_JS, _FALLBACK_PY):
+        for regex in (_FALLBACK_JS, _FALLBACK_PY, _FALLBACK_PY_OR, _FALLBACK_JS_DESTRUCT):
             m = regex.search(line)
             if not m:
                 continue
-            # _FALLBACK_PY now captures (env_var_name, fallback_value)
-            # _FALLBACK_JS captures only (fallback_value) — env var in the expression itself
-            if regex is _FALLBACK_PY:
+            # _FALLBACK_PY / _FALLBACK_PY_OR: group 1 = env var name, group 2 = fallback value
+            # _FALLBACK_JS_DESTRUCT: group 1 = var name (check with _CRED_VAR_NAME), group 2 = fallback value
+            # _FALLBACK_JS: group 1 = fallback value only — check full line for credential var name
+            if regex in (_FALLBACK_PY, _FALLBACK_PY_OR):
                 env_var_name = m.group(1)
                 fallback_value = m.group(2).strip()
                 # Only flag if the env var name looks like a credential
+                if not _CRED_VAR_NAME.search(env_var_name):
+                    continue
+            elif regex is _FALLBACK_JS_DESTRUCT:
+                env_var_name = m.group(1)
+                fallback_value = m.group(2).strip()
                 if not _CRED_VAR_NAME.search(env_var_name):
                     continue
             else:
