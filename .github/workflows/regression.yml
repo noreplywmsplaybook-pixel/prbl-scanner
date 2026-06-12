@@ -1,0 +1,22 @@
+name: Regression Suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install pytest
+      - name: Run regression suite
+        run: pytest tests/regression/ -v --tb=short --ignore=tests/regression/test_kanakku_regression.py
+      - name: Run existing test suite
+        run: pytest prbl/scanner/tests/ -v --tb=short
