@@ -496,6 +496,17 @@ _SQL_INJECTION_PATTERNS = [
     r'(?i)(query|sql|stmt)\s*\+=\s*f["\']',
     # Multi-line: variable re-assigned by appending user-controlled fragment
     r'(?i)(query|sql|stmt)\s*=\s*(query|sql|stmt)\s*\+',
+    # SQLAlchemy text() sink with string concatenation or f-string interpolation.
+    # Only fires when text() contains an interpolated/concatenated expression —
+    # bare text("SELECT ...") with no + or { is safe and is excluded by the taint gate.
+    r'(?i)\btext\s*\(\s*f["\'].*\{',
+    r'(?i)\btext\s*\([^)]*\+',
+    # Python .format() string SQL injection.
+    # "SELECT * FROM users WHERE id = {}".format(uid)  is unsafe — same as %-format.
+    # The string must contain a SQL keyword, then .format( call on it.
+    r'(?i)["\'].*SELECT.*["\']\.format\s*\(',
+    r'(?i)["\'].*INSERT.*["\']\.format\s*\(',
+    r'(?i)["\'].*WHERE.*["\']\.format\s*\(',
 ]
 
 # Secondary gate for SQL injection: at least one of these signals must appear in
@@ -515,8 +526,8 @@ _SQL_CONTEXT_SIGNALS = re.compile(
 )
 
 _CMD_INJECTION_PATTERNS = [
-    r'(?i)(exec|spawn|system|popen|subprocess\.call|subprocess\.run|os\.system)\s*\([^)]*\+',
-    r'(?i)(exec|spawn)\s*\(`[^`]*\$\{',
+    r'(?i)(exec|spawn|execFile|spawnSync|system|popen|subprocess\.call|subprocess\.run|os\.system)\s*\([^)]*\+',
+    r'(?i)(exec|spawn|execFile|spawnSync)\s*\(`[^`]*\$\{',
     # shell=True is only a finding when user input is verifiably present in the same window.
     # Do NOT flag shell=True alone — subprocess.run(['ls'], shell=True) is bad practice
     # but not injection without user-controlled data flowing in.
@@ -1090,6 +1101,10 @@ _NOSQL_PATTERNS = [
     r'\.(find|findOne|findOneAndUpdate|findOneAndDelete|deleteOne|deleteMany|updateOne|updateMany|count|countDocuments)\s*\(\s*(req\.(body|query|params)|request\.(json|args|form))\b',
     # mapReduce with interpolated JS
     r'mapReduce\s*\(\s*["\'`].*(\+|\$\{)',
+    # pymongo dict-value injection: collection.find({"field": request.args[...]})
+    # The current patterns only catch request.* as the direct argument.
+    # This sub-pattern catches user input as a *value inside* the dict literal.
+    r'\.(find|findOne|findOneAndUpdate|findOneAndDelete|deleteOne|deleteMany|updateOne|updateMany|count|countDocuments)\s*\(\s*\{[^}]*request\.(args|form|json|values|get_json)',
 ]
 
 _NOSQL_COMPILED = [re.compile(p) for p in _NOSQL_PATTERNS]

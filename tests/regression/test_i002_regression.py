@@ -91,3 +91,80 @@ def test_method_exec_variants_not_flagged():
         i002 = [f for f in findings if f['rule_id'] == 'PRBL-I002']
         assert not i002, \
             f"PRBL-I002 must not fire on .exec() method: {code!r}. Got: {i002}"
+
+
+# ── execFile / spawnSync sinks (PRBL-I002 roadmap item 5) ────────────────────
+
+def test_execfile_user_controlled_cmd_fires():
+    """True positive: execFile with user-controlled first arg fires I002."""
+    code = '''
+const { execFile } = require('child_process')
+function run(req) {
+  execFile(req.body.command + '', [arg1, arg2])
+}
+'''
+    findings = run(code)
+    assert any(f['rule_id'] == 'PRBL-I002' for f in findings), \
+        "PRBL-I002 must fire on execFile with user-controlled executable path"
+
+
+def test_execfile_template_literal_fires():
+    """True positive: execFile with template literal cmd and user input fires I002."""
+    code = '''
+const { execFile } = require('child_process')
+function convert(req) {
+  execFile(`convert ${req.body.filename}`, ['output.png'])
+}
+'''
+    findings = run(code)
+    assert any(f['rule_id'] == 'PRBL-I002' for f in findings), \
+        "PRBL-I002 must fire on execFile with template literal taint"
+
+
+def test_spawnsync_user_input_fires():
+    """True positive: spawnSync with user-controlled argument fires I002."""
+    code = '''
+const { spawnSync } = require('child_process')
+function convert(req) {
+  spawnSync('convert ' + req.query.input, ['--flag'])
+}
+'''
+    findings = run(code)
+    assert any(f['rule_id'] == 'PRBL-I002' for f in findings), \
+        "PRBL-I002 must fire on spawnSync with user-controlled argument"
+
+
+def test_execfile_static_args_not_flagged():
+    """True negative: execFile with only static args must not fire."""
+    code = '''
+const { execFile } = require('child_process')
+execFile('ls', ['-la', '/tmp'])
+'''
+    findings = run(code)
+    i002 = [f for f in findings if f['rule_id'] == 'PRBL-I002']
+    assert not i002, \
+        f"PRBL-I002 must not fire on execFile with static args only. Got: {i002}"
+
+
+def test_execfile_node_script_not_flagged():
+    """True negative: execFile('node', ['script.js']) with no user input must not fire."""
+    code = '''
+const { execFile } = require('child_process')
+execFile('node', ['script.js'])
+'''
+    findings = run(code)
+    i002 = [f for f in findings if f['rule_id'] == 'PRBL-I002']
+    assert not i002, \
+        f"PRBL-I002 must not fire on execFile with static 'node' + 'script.js'. Got: {i002}"
+
+
+def test_spawnsync_static_args_not_flagged():
+    """True negative: spawnSync with no user input must not fire."""
+    code = '''
+const { spawnSync } = require('child_process')
+spawnSync('git', ['status'])
+'''
+    findings = run(code)
+    i002 = [f for f in findings if f['rule_id'] == 'PRBL-I002']
+    assert not i002, \
+        f"PRBL-I002 must not fire on spawnSync with static args only. Got: {i002}"

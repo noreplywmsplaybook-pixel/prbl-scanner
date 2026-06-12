@@ -221,11 +221,9 @@ f"INSERT INTO logs WHERE {condition}"
 
 #### Known Limitations
 
-**Covered:** String concatenation and template-literal interpolation into SQL queries, Python f-string SQL, Python `%`-format SQL (psycopg2 legacy pattern), multi-line query building with `+=`. Understands knex, sequelize, prisma, typeorm, pg, mysql as safe-context signals. Tagged template literals (`sql\`...\``, `$queryRaw\`...\``, `drizzle.sql\`...\``) are correctly excluded as parameterized.
+**Covered:** String concatenation and template-literal interpolation into SQL queries, Python f-string SQL, Python `%`-format SQL (psycopg2 legacy pattern), Python `.format()` string SQL, SQLAlchemy `text()` with string concatenation or f-string interpolation, multi-line query building with `+=`. Understands knex, sequelize, prisma, typeorm, pg, mysql as safe-context signals. Tagged template literals (`sql\`...\``, `$queryRaw\`...\``, `drizzle.sql\`...\``) are correctly excluded as parameterized.
 
 **Not covered:**
-- `psycopg2` `cursor.execute()` with `.format()` string method: `"SELECT * FROM users WHERE id = {}".format(uid)` — the `{}` placeholder is not yet a detected pattern. (MEDIUM — straightforward pattern addition.)
-- SQLAlchemy Core `text()` with string concatenation: `text("SELECT * FROM users WHERE id = " + uid)` — the `text()` call is not in the sink list. (MEDIUM — add `text(` as a sink with SQL context signal.)
 - Go's `database/sql` `db.Query("SELECT..." + input)` — Go is out of scope. (OUT OF SCOPE.)
 - Rails `ActiveRecord.where("name = '#{params[:name]}'")` with Ruby interpolation — Ruby is out of scope. (OUT OF SCOPE.)
 - Rails `ActiveRecord.order(params[:sort])` — ToB sharp-edges Ruby reference identifies this as a distinct SQL injection sub-pattern where unsanitized user input is passed to `.order()`, enabling column-name injection or `DROP TABLE` via semicolon; requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
@@ -261,13 +259,12 @@ Uses the same taint-source logic as PRBL-I001.
 
 #### Known Limitations
 
-**Covered:** `exec`, `spawn`, `system`, `popen`, `subprocess.call`, `subprocess.run`, `os.system` with string concatenation or `shell=True` plus user input.
+**Covered:** `exec`, `spawn`, `execFile`, `spawnSync`, `system`, `popen`, `subprocess.call`, `subprocess.run`, `os.system` with string concatenation or template-literal interpolation or `shell=True` plus user input.
 
 **Not covered:**
 - Go's `exec.Command` — Go is out of scope. (OUT OF SCOPE.)
 - Rust's `std::process::Command` — Rust is out of scope. (OUT OF SCOPE.)
 - Ruby backticks, `%x(...)`, `system()`, and `exec()` with string interpolation (`` `ls #{params[:dir]}` ``) — ToB sharp-edges Ruby reference documents all four as command injection sinks; requires Ruby language support. (OUT OF SCOPE — different language; sourced from Trail of Bits research — needs validation before implementing.)
-- Node.js `child_process.execFile()` and `spawnSync()` — these are safer by design (no shell expansion when called with an array) but `execFile` with a concatenated string argument is still injectable. (MEDIUM — add `execFile` to the sink list.)
 - Python `shlex.split()` followed by `subprocess.run()` is a safe pattern and is not flagged. This is correct behavior.
 
 ---
@@ -342,10 +339,9 @@ Uses the same taint-source logic as PRBL-I001.
 
 #### Known Limitations
 
-**Covered:** Mongoose `find`, `findOne`, `findOneAndUpdate`, `findOneAndDelete`, `deleteOne/Many`, `updateOne/Many`, `count`, `countDocuments` with `req.body` / `req.query` / `req.params` or `request.json` / `request.args` passed directly. `$where` string interpolation and `mapReduce` interpolation.
+**Covered:** Mongoose `find`, `findOne`, `findOneAndUpdate`, `findOneAndDelete`, `deleteOne/Many`, `updateOne/Many`, `count`, `countDocuments` with `req.body` / `req.query` / `req.params` or `request.json` / `request.args` passed directly or as a value inside a dict literal (pymongo dict-value injection). `$where` string interpolation and `mapReduce` interpolation.
 
 **Not covered:**
-- `pymongo` (Python MongoDB driver): `collection.find({"name": request.args["name"]})` where the user value is embedded in a dict literal rather than passed as the whole query object — the current pattern only fires when `request.args` or `request.form` is the *direct* argument to the query method, not when it's a value inside a nested dict. (MEDIUM — new sub-pattern needed for dict-value injection.)
 - `mongo-go-driver` — Go is out of scope. (OUT OF SCOPE.)
 - DynamoDB `FilterExpression` string injection — different NoSQL store, no pattern coverage. (OUT OF SCOPE — distinct vulnerability class.)
 - Firestore `where()` chained with user input — no pattern coverage; Firestore queries use a builder API that is generally injection-resistant, but expression injection is possible in edge cases. (MEDIUM — new rule or sub-pattern needed.)
@@ -535,26 +531,18 @@ Categories and rankings follow the **OWASP Top 10 2021** revision (the current s
 
 Prioritized MEDIUM items from the Known Limitations analysis above. Sorted by estimated impact (coverage gap × real-world frequency in AI-generated code):
 
-1. **PRBL-I001 — SQLAlchemy `text()` sink** · Add `text(` to SQL injection sinks for Python. SQLAlchemy `text("SELECT ... WHERE id = " + user_id)` is a common pattern in AI-generated Python backends and is currently not detected. Low false-positive risk because `text(` is unambiguous in SQLAlchemy context.
+1. **PRBL-A001 — GraphQL resolver function signature detection** · AI-generated GraphQL backends (Apollo Server, Strawberry, Ariadne) are common and never have route declarations in the Express/Flask sense. A resolver-function pattern like `resolvers.Query.someField = (_, args) =>` performing a DB operation with no auth check is a real PRBL-A001 gap with meaningful frequency.
 
-2. **PRBL-I001 — Python `.format()` string SQL injection** · Add `"SELECT...".format(var)` pattern. The `%`-format gap is now fixed; `.format()` is the other common legacy interpolation style and is similarly unsafe with psycopg2 or raw sqlite3. Clear test cases exist.
+2. **PRBL-T001 — `shutil` sinks** · Add `shutil.copy`, `shutil.move`, `shutil.rmtree` as path traversal sinks for Python. These are destructive file operations and are commonly generated without sanitization in file-management utilities.
 
-3. **PRBL-A001 — GraphQL resolver function signature detection** · AI-generated GraphQL backends (Apollo Server, Strawberry, Ariadne) are common and never have route declarations in the Express/Flask sense. A resolver-function pattern like `resolvers.Query.someField = (_, args) =>` performing a DB operation with no auth check is a real PRBL-A001 gap with meaningful frequency.
+3. **PRBL-I003 — `importlib.import_module(user_input)`** · Add `import_module(` to code injection patterns. Less common than `eval`/`exec`, but AI-generated plugin-loader code sometimes generates this pattern with user-controlled module names.
 
-4. **PRBL-I004 — `pymongo` dict-value injection** · `collection.find({"name": request.args["name"]})` — the user value is inside a dict literal rather than the whole query argument. The current pattern only catches direct pass-through. A new sub-pattern for `request.args[...]` or `request.form[...]` as a dict value in a `.find(` / `.findOne(` call would cover this.
+4. **PRBL-P001 — Private registry allow-list** · Add a configurable list of package name prefixes that should skip the registry check (e.g. `@mycompany/`). Reduces noise for teams with private registries without disabling the rule entirely.
 
-5. **PRBL-I002 — `child_process.execFile()` sink** · Add `execFile` to command injection sinks. `execFile` with a user-controlled first argument (the executable path) is injectable even without shell expansion. Straightforward pattern addition.
+5. **PRBL-A001 — Fastify / Hono / Koa route patterns** · Expand `_ROUTE_PATTERNS["javascript"]` with Fastify's `fastify.route()` / `fastify.get()` and Hono's `app.get()`. These already partially work via the generic Express pattern but the Fastify object-config style (`{ method, url, handler }`) is missed.
 
-6. **PRBL-T001 — `shutil` sinks** · Add `shutil.copy`, `shutil.move`, `shutil.rmtree` as path traversal sinks for Python. These are destructive file operations and are commonly generated without sanitization in file-management utilities.
+6. **PRBL-C001 — Dict-literal credential detection** · `config = {"password": "hunter2"}` is not caught because the assignment pattern requires `=` syntax. A new pattern for string values inside dict literals where the key is a credential name would cover this common AI-generated config initialization pattern.
 
-7. **PRBL-I003 — `importlib.import_module(user_input)`** · Add `import_module(` to code injection patterns. Less common than `eval`/`exec`, but AI-generated plugin-loader code sometimes generates this pattern with user-controlled module names.
-
-8. **PRBL-P001 — Private registry allow-list** · Add a configurable list of package name prefixes that should skip the registry check (e.g. `@mycompany/`). Reduces noise for teams with private registries without disabling the rule entirely.
-
-9. **PRBL-A001 — Fastify / Hono / Koa route patterns** · Expand `_ROUTE_PATTERNS["javascript"]` with Fastify's `fastify.route()` / `fastify.get()` and Hono's `app.get()`. These already partially work via the generic Express pattern but the Fastify object-config style (`{ method, url, handler }`) is missed.
-
-10. **PRBL-C001 — Dict-literal credential detection** · `config = {"password": "hunter2"}` is not caught because the assignment pattern requires `=` syntax. A new pattern for string values inside dict literals where the key is a credential name would cover this common AI-generated config initialization pattern.
-
-11. **PRBL-R001 — Timing-safe comparison gap** *(sourced from Trail of Bits research — needs validation before implementing)* · Add a sub-pattern detecting direct `==` comparison on values in `mac`, `digest`, `hmac`, `signature`, `token` variable contexts in Python (should use `hmac.compare_digest()`) and JavaScript (should use `crypto.timingSafeEqual()`). ToB's constant-time-analysis skill documents this as a distinct vulnerability class across 12 languages; it is not currently captured by the RNG-source focus of PRBL-R001.
+7. **PRBL-R001 — Timing-safe comparison gap** *(sourced from Trail of Bits research — needs validation before implementing)* · Add a sub-pattern detecting direct `==` comparison on values in `mac`, `digest`, `hmac`, `signature`, `token` variable contexts in Python (should use `hmac.compare_digest()`) and JavaScript (should use `crypto.timingSafeEqual()`). ToB's constant-time-analysis skill documents this as a distinct vulnerability class across 12 languages; it is not currently captured by the RNG-source focus of PRBL-R001.
 
 12. **PRBL-A001 — Prototype pollution access control bypass** *(sourced from Trail of Bits research — needs validation before implementing)* · Add a sub-pattern detecting unsafe merge/assign of untrusted input (`req.body`, `req.query`) into plain objects — e.g. `Object.assign({}, req.body)`, custom recursive merge functions — where the result is used in an authorization check. ToB sharp-edges JS reference documents `{"__proto__": {"isAdmin": true}}` as a pre-authentication privilege escalation that bypasses all route-level auth indicators without touching a recognized auth pattern.

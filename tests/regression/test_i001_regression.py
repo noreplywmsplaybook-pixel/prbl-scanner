@@ -243,3 +243,155 @@ cursor.execute(query)
     i001 = [f for f in findings if f['rule_id'] == 'PRBL-I001']
     assert not i001, \
         f"PRBL-I001 must not fire on %-format with a static constant (no user taint). Got: {i001}"
+
+
+# ── SQLAlchemy text() sink (PRBL-I001 roadmap item 1) ────────────────────────
+
+def test_sqlalchemy_text_concat_fires():
+    """True positive: SQLAlchemy text() with string concatenation fires I001."""
+    code = '''
+from sqlalchemy import text
+def get_user(user_id):
+    result = db.execute(text("SELECT * FROM users WHERE id = " + user_id))
+'''
+    findings = run(code, language='python', file_path='db.py')
+    assert any(f['rule_id'] == 'PRBL-I001' for f in findings), \
+        "PRBL-I001 must fire on SQLAlchemy text() with string concatenation"
+
+
+def test_sqlalchemy_text_fstring_fires():
+    """True positive: SQLAlchemy text() with f-string fires I001."""
+    code = '''
+from sqlalchemy import text
+def get_user(user_id):
+    result = db.execute(text(f"SELECT * FROM users WHERE id = {user_id}"))
+'''
+    findings = run(code, language='python', file_path='db.py')
+    assert any(f['rule_id'] == 'PRBL-I001' for f in findings), \
+        "PRBL-I001 must fire on SQLAlchemy text() with f-string interpolation"
+
+
+def test_sqlalchemy_text_request_args_fires():
+    """True positive: SQLAlchemy text() with request.args fires I001."""
+    code = '''
+from sqlalchemy import text
+def search(request):
+    uid = request.args.get("id")
+    result = db.execute(text("SELECT * FROM users WHERE id = " + uid))
+'''
+    findings = run(code, language='python', file_path='views.py')
+    assert any(f['rule_id'] == 'PRBL-I001' for f in findings), \
+        "PRBL-I001 must fire on SQLAlchemy text() with request.args taint"
+
+
+def test_sqlalchemy_text_bare_static_not_flagged():
+    """True negative: SQLAlchemy text() with a bare static string must not fire."""
+    code = '''
+from sqlalchemy import text
+result = db.execute(text("SELECT * FROM users"))
+'''
+    findings = run(code, language='python', file_path='db.py')
+    i001 = [f for f in findings if f['rule_id'] == 'PRBL-I001']
+    assert not i001, \
+        f"PRBL-I001 must not fire on text() with bare static SQL (no interpolation). Got: {i001}"
+
+
+def test_sqlalchemy_text_parameterized_not_flagged():
+    """True negative: SQLAlchemy text() with named bound parameters must not fire."""
+    code = '''
+from sqlalchemy import text
+def get_user(user_id):
+    result = db.execute(text("SELECT * FROM users WHERE id = :id"), {"id": user_id})
+'''
+    findings = run(code, language='python', file_path='db.py')
+    i001 = [f for f in findings if f['rule_id'] == 'PRBL-I001']
+    assert not i001, \
+        f"PRBL-I001 must not fire on text() with parameterized :id placeholder. Got: {i001}"
+
+
+def test_sqlalchemy_text_no_taint_not_flagged():
+    """True negative: SQLAlchemy text() concat with no user taint must not fire."""
+    code = '''
+from sqlalchemy import text
+TABLE = "users"
+result = db.execute(text("SELECT * FROM " + TABLE))
+'''
+    findings = run(code, language='python', file_path='db.py')
+    i001 = [f for f in findings if f['rule_id'] == 'PRBL-I001']
+    assert not i001, \
+        f"PRBL-I001 must not fire on text() concat with static constant (no user taint). Got: {i001}"
+
+
+# ── Python .format() string SQL injection (PRBL-I001 roadmap item 2) ─────────
+
+def test_format_string_sql_fires():
+    """True positive: .format() SQL injection with user input fires I001."""
+    code = '''
+def get_user(user_id):
+    cursor.execute("SELECT * FROM users WHERE id = {}".format(user_id))
+'''
+    findings = run(code, language='python', file_path='db.py')
+    assert any(f['rule_id'] == 'PRBL-I001' for f in findings), \
+        "PRBL-I001 must fire on .format() SQL injection"
+
+
+def test_format_string_table_injection_fires():
+    """True positive: .format() with table name and WHERE clause fires I001."""
+    code = '''
+def search(table, name):
+    query = "SELECT * FROM {} WHERE name = '{}'".format(table, name)
+    cursor.execute(query)
+'''
+    findings = run(code, language='python', file_path='db.py')
+    assert any(f['rule_id'] == 'PRBL-I001' for f in findings), \
+        "PRBL-I001 must fire on .format() with table and WHERE clause"
+
+
+def test_format_string_request_args_fires():
+    """True positive: .format() with request.args fires I001."""
+    code = '''
+def search(request):
+    uid = request.args["id"]
+    cursor.execute("SELECT * FROM users WHERE id = {}".format(uid))
+'''
+    findings = run(code, language='python', file_path='views.py')
+    assert any(f['rule_id'] == 'PRBL-I001' for f in findings), \
+        "PRBL-I001 must fire on .format() SQL injection with request.args taint"
+
+
+def test_format_string_log_message_not_flagged():
+    """True negative: .format() on a log message must not fire (not a SQL context)."""
+    code = '''
+def process(user_id):
+    log_message = "Processing user {}".format(user_id)
+    print(log_message)
+'''
+    findings = run(code, language='python', file_path='utils.py')
+    i001 = [f for f in findings if f['rule_id'] == 'PRBL-I001']
+    assert not i001, \
+        f"PRBL-I001 must not fire on .format() used for a log message (no SQL context). Got: {i001}"
+
+
+def test_format_string_no_taint_not_flagged():
+    """True negative: .format() SQL string with only static args must not fire."""
+    code = '''
+TABLE = "users"
+LIMIT = 10
+query = "SELECT * FROM {} LIMIT {}".format(TABLE, LIMIT)
+cursor.execute(query)
+'''
+    findings = run(code, language='python', file_path='db.py')
+    i001 = [f for f in findings if f['rule_id'] == 'PRBL-I001']
+    assert not i001, \
+        f"PRBL-I001 must not fire on .format() with static constants only (no user taint). Got: {i001}"
+
+
+def test_format_string_insert_fires():
+    """True positive: .format() with INSERT keyword fires I001."""
+    code = '''
+def insert_record(name):
+    cursor.execute("INSERT INTO users (name) VALUES ('{}')".format(name))
+'''
+    findings = run(code, language='python', file_path='db.py')
+    assert any(f['rule_id'] == 'PRBL-I001' for f in findings), \
+        "PRBL-I001 must fire on .format() with INSERT SQL keyword"
