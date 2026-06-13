@@ -354,3 +354,37 @@ def test_fixtures_dir_skipped():
     findings = run(code, language='javascript', file_path='tests/fixtures/UserFixture.js')
     c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
     assert not c001, f"PRBL-C001 must not fire in fixtures/ dir. Got: {c001}"
+
+
+# ── VALUE ENTROPY SUPPRESSIONS (Fix 1) ────────────────────────────────────────
+
+def test_non_ascii_value_suppressed():
+    """True negative: non-ASCII (Bengali) string value is not a credential (i18n label)."""
+    code = "const config = { 'auth.password': 'পাসওয়ার্ড' }"
+    findings = run(code, language='javascript', file_path='i18n.js')
+    c001 = [f for f in findings if f['rule_id'] in ('PRBL-C001', 'PRBL-C002')]
+    assert not c001, f"C001/C002 must not fire on non-ASCII i18n value. Got: {c001}"
+
+
+def test_status_string_value_suppressed():
+    """True negative: single lowercase word 'configured' is a status string, not a secret."""
+    code = "openai_api_key: 'configured'"
+    findings = run(code, language='javascript', file_path='config.js')
+    c001 = [f for f in findings if f['rule_id'] in ('PRBL-C001', 'PRBL-C002')]
+    assert not c001, f"C001 must not fire on status string value 'configured'. Got: {c001}"
+
+
+def test_real_secret_not_suppressed_by_entropy_check():
+    """True positive: real looking secret still fires C001 (not suppressed by entropy check)."""
+    code = "api_key = 'sk-live-abc123xyz789ABCDEF'"
+    findings = run(code, language='python', file_path='config.py')
+    assert any(f['rule_id'] == 'PRBL-C001' for f in findings), \
+        "C001 must still fire on a real-looking secret value"
+
+
+def test_mixed_case_with_digits_not_suppressed():
+    """True positive: 'X9k$mP2#vL8' is not a status string and fires C001."""
+    code = "secret = 'X9k-mP2-vL8-secret-key'"
+    findings = run(code, language='python', file_path='app.py')
+    assert any(f['rule_id'] in ('PRBL-C001', 'PRBL-C002') for f in findings), \
+        "C001 must fire on high-entropy value with digits and mixed case"

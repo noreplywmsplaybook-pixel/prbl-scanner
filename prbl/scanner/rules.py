@@ -150,6 +150,27 @@ _CRED_PLACEHOLDER_VALUES = re.compile(
 # plaintext secrets. A bcrypt hash cannot be reversed to recover the original.
 _BCRYPT_HASH = re.compile(r'^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$')
 
+# ── Value entropy suppressors (applied to the VALUE side only) ────────────────
+
+def _is_non_ascii(value: str) -> bool:
+    """Return True if the value contains any non-ASCII characters (Unicode > 127).
+    Non-ASCII values are i18n labels, translated strings, or UI text — never secrets."""
+    return any(ord(c) > 127 for c in value)
+
+# Known status/configuration indicator words — clearly not secrets.
+# Explicit allowlist rather than a broad regex to avoid suppressing real credential words
+# like 'supersecret', 'password', 'letmein', etc. (those are caught by _CRED_PLACEHOLDER_VALUES).
+_STATUS_WORDS = frozenset({
+    'configured', 'enabled', 'disabled', 'active', 'inactive',
+    'success', 'pending', 'connected', 'disconnected', 'ready',
+    'running', 'stopped', 'started', 'loading', 'loaded',
+    'valid', 'invalid', 'verified', 'unverified', 'authorized',
+    'unauthorized', 'authenticated', 'unauthenticated',
+    'available', 'unavailable', 'online', 'offline', 'healthy',
+    'unhealthy', 'idle', 'busy', 'paused', 'completed', 'failed',
+    'initialized', 'uninitialized', 'deprecated', 'experimental',
+})
+
 # ── Fallback secret patterns ──────────────────────────────────────────────────
 # Detects: process.env.X || 'literal'  /  process.env.X ?? 'literal'
 #          os.environ.get('X', 'literal')  /  os.getenv('X', 'literal')
@@ -253,6 +274,9 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
                     continue
             if _FALLBACK_SAFE_VALUE.match(fallback_value):
                 continue  # empty / boolean / numeric / algorithm — not a secret
+            # Suppress if the fallback value is non-ASCII or a single lowercase status word
+            if _is_non_ascii(fallback_value) or fallback_value.lower() in _STATUS_WORDS:
+                continue
             findings.append(_match(
                 rule_id="PRBL-C001",
                 vuln_class="hardcoded_credentials",
@@ -329,6 +353,10 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
                     if cred_val_m:
                         cred_value = cred_val_m[-1]
                 if cred_value and _CRED_PLACEHOLDER_VALUES.match(cred_value):
+                    break
+                # Suppress C001/C002 when the value has obviously-too-low entropy:
+                # non-ASCII chars → i18n label; single lowercase word → status indicator
+                if cred_value and (_is_non_ascii(cred_value) or cred_value.lower() in _STATUS_WORDS):
                     break
                 # Suppress if the value is a bcrypt hash — already-hashed passwords
                 # in seeders/fixtures are not plaintext secrets.
@@ -1223,6 +1251,18 @@ _A001_UTILITY_FILES = re.compile(
     r'(?i)(pagination|response_schema|base_view|mixin|schema_util)\.(py|ts|js)$',
 )
 
+# Known-safe route paths — intentionally unauthenticated by design across all frameworks.
+# Applies both to route line path strings and Next.js App Router file paths.
+# Matches bare paths (/health) and API-prefixed paths (/api/health, /api/status, etc.)
+_A001_PUBLIC_ROUTES = re.compile(
+    r'(?i)["\']/?(?:api/)?(?:health|healthz|ping|status|ready|readyz|live|liveness|'
+    r'metrics|favicon\.ico|robots\.txt|sitemap\.xml|\.well-known/)["\']',
+)
+# Next.js App Router: file path contains /api/health/, /api/ping/, /api/status/
+_A001_PUBLIC_FILE_PATH = re.compile(
+    r'(?i)/api/(?:health|ping|status|ready|live|liveness|healthz|readyz)/',
+)
+
 
 def _has_django_settings(file_path: str) -> bool:
     """
@@ -1274,6 +1314,9 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
     if file_path:
         fp_lower = file_path.replace('\\', '/')
         if _A001_UTILITY_PATHS.search(fp_lower) or _A001_UTILITY_FILES.search(fp_lower):
+            return findings
+        # Next.js App Router: suppress A001 for known public endpoint directories
+        if _A001_PUBLIC_FILE_PATH.search(fp_lower):
             return findings
 
     full_text = '\n'.join(lines)
@@ -1340,6 +1383,10 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
 
         # Skip intentionally public infrastructure endpoints and auth flow routes.
         if _PUBLIC_ROUTE_RE.search(line):
+            i += 1
+            continue
+        # Skip known-safe health/ping/status/metrics endpoints — always unauthenticated by design.
+        if _A001_PUBLIC_ROUTES.search(line):
             i += 1
             continue
         # include_in_schema=False marks internal/doc routes explicitly hidden
@@ -1606,6 +1653,8 @@ def check_session_secret(lines: list[str], language: str) -> list[RuleMatch]:
         if value_m and _FALLBACK_SAFE_VALUE.match(value_m.group(1)):
             continue
         if value_m and _CRED_PLACEHOLDER_VALUES.match(value_m.group(1)):
+            continue
+        if value_m and (_is_non_ascii(value_m.group(1)) or value_m.group(1).lower() in _STATUS_WORDS):
             continue
         if value_m and _BCRYPT_HASH.match(value_m.group(1)):
             continue

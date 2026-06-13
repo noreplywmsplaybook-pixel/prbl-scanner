@@ -356,3 +356,55 @@ app.get('/profile', requireAuth, (req, res) => {
     a001_after = [f for f in all_after if f.rule_id == 'PRBL-A001']
     assert a001_after, \
         "A001 must be kept when at least one file has auth indicators"
+
+
+# ── KNOWN-SAFE ROUTE ALLOWLIST (Fix 2) ────────────────────────────────────────
+
+def test_health_route_suppressed():
+    """True negative: /health route must not fire A001."""
+    code = """
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', db: db.ping() })
+})
+"""
+    findings = run(code, language='javascript', file_path='routes.js')
+    a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
+    assert not a001, f"A001 must not fire on /health route. Got: {a001}"
+
+
+def test_api_status_route_suppressed():
+    """True negative: /api/status route must not fire A001."""
+    code = """
+app.get('/api/status', (req, res) => {
+  res.json({ uptime: process.uptime(), users: User.count() })
+})
+"""
+    findings = run(code, language='javascript', file_path='routes.js')
+    a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
+    assert not a001, f"A001 must not fire on /api/status route. Got: {a001}"
+
+
+def test_api_users_route_still_fires():
+    """True positive: /api/users with no auth still fires A001."""
+    code = """
+app.get('/api/users', (req, res) => {
+  const users = User.findAll()
+  res.json(users)
+})
+"""
+    findings = run(code, language='javascript', file_path='routes.js')
+    a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
+    assert a001, "A001 must still fire on /api/users without auth"
+
+
+def test_nextjs_health_file_path_suppressed():
+    """True negative: Next.js App Router health endpoint file must not fire A001."""
+    code = """
+export async function GET(request) {
+  const status = await db.query('SELECT 1')
+  return Response.json({ status: 'ok' })
+}
+"""
+    findings = run(code, language='javascript', file_path='app/api/health/route.ts')
+    a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
+    assert not a001, f"A001 must not fire on app/api/health/route.ts. Got: {a001}"
