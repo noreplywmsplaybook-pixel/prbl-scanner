@@ -102,6 +102,13 @@ _CRED_SAFE_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 
+# Public search API key context — Algolia and similar search services use a
+# "search-only" API key that is intentionally exposed in client-side code.
+# The key is read-only and scoped to a specific index; it cannot modify data.
+_CRED_PUBLIC_SEARCH_CONTEXT = re.compile(
+    r'(?i)(algolia\s*[:{]|appId\s*[=:]|indexName\s*[=:]|docsearch|search-only|searchOnlyApiKey)',
+)
+
 # Safe variable name — if the *left side* of the assignment contains placeholder
 # language the value is intentionally fake. Check only the variable name, not the
 # value — "AKIAIOSFODNN7EXAMPLE" contains "example" but it's a real key format.
@@ -274,6 +281,18 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
             continue
         # Canonical jwt.io example token — not a real credential
         if _JWTIO_EXAMPLE_HEADER in line:
+            continue
+        # Public search-only API keys (Algolia, DocSearch) are intentionally exposed
+        # in client-side code — they are scoped to read-only search and cannot modify data.
+        search_window = '\n'.join(lines[max(0, i - 5):min(len(lines), i + 2)])
+        if _CRED_PUBLIC_SEARCH_CONTEXT.search(search_window):
+            continue
+        # Enum class members — variable names containing "secret" as part of an enum
+        # value label (VIEW_ENDPOINT_SECRET = "ViewEndpointSecret") are capability
+        # labels, not actual secrets. Check 20 lines above for enum class declaration.
+        # Matches Python (class Foo(Enum)) and TypeScript (export enum Foo).
+        enum_window = '\n'.join(lines[max(0, i - 20):i])
+        if re.search(r'(?:class\s+\w+.*\bEnum\b|\benum\s+\w+\s*\{)', enum_window):
             continue
         for pattern, description in _CRED_PATTERNS:
             if re.search(pattern, line):
@@ -605,6 +624,15 @@ _USER_INPUT_VARS = re.compile(
     r'sys\.argv|os\.environ|getenv|input\(|flask\.request|django.*request)',
 )
 
+# Additional taint sources that are only relevant in a SQL context.
+# settings.* / config.* / environ[ can carry schema names, table names, or
+# other operator-controlled values that make SQL strings exploitable.
+# These are NOT checked by _has_taint() directly; instead they are tested
+# in a separate helper that is only invoked after _SQL_CONTEXT_SIGNALS passes.
+_SQL_SETTINGS_TAINT = re.compile(
+    r'(?i)(settings\.\w+|config\.\w+|os\.environ\[|environ\[)',
+)
+
 _FN_SIG = re.compile(r'\bdef\s+\w+\s*\(([^)]+)\)')
 # JS/TS equivalents: function declarations, function expressions, arrow functions
 _FN_SIG_JS = re.compile(
@@ -666,6 +694,8 @@ _SQL_INJECTION_PATTERNS = [
     r'(?i)f["\'].*SELECT.*\{',
     r'(?i)f["\'].*INSERT.*\{',
     r'(?i)f["\'].*WHERE.*\{',
+    r'(?i)f["\'].*\bCREATE\s+(TABLE|DATABASE|SCHEMA|INDEX|VIEW)\b.*\{',
+    r'(?i)f["\'].*\bDROP\s+(TABLE|DATABASE|SCHEMA|INDEX|VIEW)\b.*\{',
     # Single-line: Python %-string formatting with SQL keyword
     # Catches: cursor.execute("SELECT * FROM users WHERE id = %s" % user_id)
     # and:     cursor.execute("SELECT ... WHERE name = '%s'" % name)
@@ -779,7 +809,10 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
                 ctx_window = '\n'.join(lines[ctx_start:ctx_end])
                 if not _SQL_CONTEXT_SIGNALS.search(ctx_window):
                     break
-                if _has_taint(window):
+                # settings.*/config.*/environ[ as secondary taint source — Python only.
+                # In JS/TS, config.* is too common in framework/webpack code to use as taint.
+                sql_settings_taint = (language == "python" and _SQL_SETTINGS_TAINT.search(window))
+                if _has_taint(window) or sql_settings_taint:
                     findings.append(_match(
                         rule_id="PRBL-I001",
                         vuln_class="injection",
@@ -1057,6 +1090,16 @@ _PUBLIC_ANNOTATION = re.compile(
     r'(?i)//\s*(@public|public endpoint|no auth required|intentionally unauthenticated)'
 )
 
+# A001 utility path suppression — framework helper files that define base classes,
+# pagination utilities, response schemas, and mixins are not route handlers and
+# should not be flagged for missing access control.
+_A001_UTILITY_PATHS = re.compile(
+    r'(?i)/(common|utils|helpers|schemas|mixins|base|pagination|response_schema)/',
+)
+_A001_UTILITY_FILES = re.compile(
+    r'(?i)(pagination|response_schema|base_view|mixin|schema_util)\.(py|ts|js)$',
+)
+
 
 def _has_django_settings(file_path: str) -> bool:
     """
@@ -1101,6 +1144,15 @@ def _has_django_settings(file_path: str) -> bool:
 
 def check_missing_access_control(lines: list[str], language: str, file_path: str = "") -> list[RuleMatch]:
     findings = []
+
+    # Suppress A001 entirely for framework utility / helper files — these define
+    # base classes, pagination helpers, response schemas, and mixins that look like
+    # routes to the pattern matcher but are not route handlers.
+    if file_path:
+        fp_lower = file_path.replace('\\', '/')
+        if _A001_UTILITY_PATHS.search(fp_lower) or _A001_UTILITY_FILES.search(fp_lower):
+            return findings
+
     full_text = '\n'.join(lines)
 
     # --- Serverless file-level handler check ---
@@ -1436,7 +1488,18 @@ _PATH_SANITIZED = re.compile(
 )
 
 
-def check_path_traversal(lines: list[str], language: str) -> list[RuleMatch]:
+_T001_PACKAGING_FILES = re.compile(
+    r'(?i)(setup\.py|setup\.cfg|pyproject\.toml|MANIFEST\.in|conftest\.py)$',
+)
+
+
+def check_path_traversal(lines: list[str], language: str, file_path: str = "") -> list[RuleMatch]:
+    # Python packaging scripts (setup.py, pyproject.toml) read their own source tree
+    # using os.path.join with hard-coded package names — never user-controlled paths.
+    # Flagging these creates noise and trains developers to dismiss T001 findings.
+    if file_path and _T001_PACKAGING_FILES.search(file_path):
+        return []
+
     findings = []
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
@@ -1477,11 +1540,11 @@ def check_path_traversal(lines: list[str], language: str) -> list[RuleMatch]:
 # ── Test-file detection ───────────────────────────────────────────────────────
 
 # Directory components that mark a file as test scaffolding
-_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "__tests__", "__mocks__", "playwright", "e2e"}
+_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "__tests__", "__mocks__", "playwright", "e2e", "benchmark", "benchmarks", "bench"}
 
 # Filename patterns that mark a file as a test (stem checks, not substring)
 _TEST_FILENAME = re.compile(
-    r'^(test_.+|.+_test|.+\.spec|.+\.test|.+\.e2e|.+\.e2e-spec)$',
+    r'^(test_.+|.+_test|.+\.spec|.+\.test|.+\.e2e|.+\.e2e-spec|runtests|run_tests)$',
     re.IGNORECASE,
 )
 
@@ -1545,11 +1608,30 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
             and any(sig in m.line for sig in ("AKIA", "sk_live_", "rk_live_", "eyJ", "ghp_", "github_pat_"))
         ]
 
-    findings += check_weak_randomness(lines, language)
+    fp_lower = file_path.replace('\\', '/').lower() if file_path else ''
+    is_benchmark = any(f'/{seg}/' in fp_lower for seg in ('benchmark', 'benchmarks', 'bench'))
+
+    weak_rand = check_weak_randomness(lines, language)
+    if is_benchmark:
+        # Benchmark files use Math.random() / random.* for perf simulation — not security.
+        # These are intentional low-entropy values in performance test fixtures; suppressing
+        # them avoids noise on timing-sensitive benchmark data generators.
+        weak_rand = [f for f in weak_rand if f.rule_id != "PRBL-R001"]
+    findings += weak_rand
     findings += check_timing_comparison(lines, language)
-    findings += check_injection(lines, language)
+    injection_findings = check_injection(lines, language)
+    if is_benchmark:
+        # Benchmark directories: suppress I003 (eval/exec in benchmark runners is not
+        # user-controlled execution — it runs controlled performance payloads).
+        injection_findings = [f for f in injection_findings if f.rule_id != "PRBL-I003"]
+    if is_test:
+        # Test runner scripts (runtests.py, run_tests.py) that call subprocess with
+        # sys.argv[1:] are forwarding developer CLI args to known tools (flake8, pytest).
+        # This pattern fires I002 but is not injection — the operator controls sys.argv.
+        injection_findings = [f for f in injection_findings if f.rule_id != "PRBL-I002"]
+    findings += injection_findings
     findings += check_nosql_injection(lines, language)
-    findings += check_path_traversal(lines, language)
+    findings += check_path_traversal(lines, language, file_path)
 
     # PRBL-C002: session secrets follow the same test-file policy as PRBL-C001
     if not is_test:
