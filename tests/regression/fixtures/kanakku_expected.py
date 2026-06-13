@@ -1,9 +1,10 @@
 """
 Kanakku (https://github.com/code-with-amitab/kanakku) — expected scanner findings.
 
-Captured: 2026-06-12
-Scanner version: Python or-fallback (_FALLBACK_PY_OR) and JS destructuring-default
-                 (_FALLBACK_JS_DESTRUCT) patterns added to PRBL-C001.
+Captured: 2026-06-13
+Scanner version: Fix 4 — PRBL-C002 now detects app.config['SECRET_KEY'] = 'literal'
+                 form (Flask dict-assignment). Adds 2 new true-positive C002 findings
+                 in debug_encryption.py and update_test_password.py.
 E2E / playwright / __mocks__ directories treated as test scaffolding — findings
 in those paths are suppressed in non-production mode.
 Run with: PrblScanner(check_packages=False).scan_directory(...)
@@ -47,9 +48,17 @@ EXPECTED_FINDINGS = [
     {"rule_id": "PRBL-P001", "severity": "high",
      "file_suffix": "banktransactions/tests/test_core/test_transaction_data.py"},
 
+    # banktransactions/tools/debug_encryption.py:53 — app.config SECRET_KEY (high) [Fix 4]
+    {"rule_id": "PRBL-C002", "severity": "high",
+     "file_suffix": "banktransactions/tools/debug_encryption.py"},
+
     # banktransactions/tools/debug_encryption.py:99 — hardcoded credential (high)
     {"rule_id": "PRBL-C001", "severity": "high",
      "file_suffix": "banktransactions/tools/debug_encryption.py"},
+
+    # banktransactions/tools/update_test_password.py:44 — app.config SECRET_KEY (high) [Fix 4]
+    {"rule_id": "PRBL-C002", "severity": "high",
+     "file_suffix": "banktransactions/tools/update_test_password.py"},
 
     # banktransactions/tools/update_test_password.py:74 — hardcoded credential (high)
     {"rule_id": "PRBL-C001", "severity": "high",

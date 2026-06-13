@@ -286,3 +286,73 @@ class UserView(APIView):
     a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
     assert not a001, \
         f"PRBL-A001 must not fire when permission_classes declared at class level. Got: {a001}"
+
+
+# ── Fix 2: Repo-wide A001 suppression (via filter_a001_if_no_repo_auth) ───────
+# Note: run_all_rules() is per-file. The repo-level suppression is in
+# PrblScanner.scan_directory() and filter_a001_if_no_repo_auth(). These tests
+# verify the helper function works correctly.
+
+def test_no_auth_anywhere_suppresses_a001():
+    """Fix 2: when no file in a repo has any auth, all A001 findings are suppressed."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+    from prbl.scanner.rules import filter_a001_if_no_repo_auth, run_all_rules
+
+    # Simulate two files: both have routes with no auth (TodoMVC style)
+    code1 = '''
+app.get('/todos', (req, res) => {
+  const todos = db.query('SELECT * FROM todos')
+  res.json(todos)
+})
+'''
+    code2 = '''
+app.post('/todos', (req, res) => {
+  db.run('INSERT INTO todos VALUES (?)', [req.body.text])
+  res.sendStatus(201)
+})
+'''
+    findings1 = run_all_rules(code1, 'javascript', 'routes/todos.js')
+    findings2 = run_all_rules(code2, 'javascript', 'routes/todos2.js')
+
+    # Before filter — should have A001
+    assert any(f.rule_id == 'PRBL-A001' for f in findings1 + findings2), \
+        "Should have A001 before repo-level filter"
+
+    # Apply repo-level filter
+    filtered = filter_a001_if_no_repo_auth([findings1, findings2], [code1, code2])
+    all_after = filtered[0] + filtered[1]
+    a001_after = [f for f in all_after if f.rule_id == 'PRBL-A001']
+    assert not a001_after, \
+        f"A001 must be suppressed when no file has auth indicators. Got: {a001_after}"
+
+
+def test_repo_with_some_auth_keeps_a001():
+    """Fix 2: if any file has auth, A001 findings are kept (partial auth = gaps)."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+    from prbl.scanner.rules import filter_a001_if_no_repo_auth, run_all_rules
+
+    code_unprotected = '''
+app.get('/admin', (req, res) => {
+  const users = db.query('SELECT * FROM users')
+  res.json(users)
+})
+'''
+    code_with_auth = '''
+const requireAuth = (req, res, next) => { /* check token */ next() }
+app.get('/profile', requireAuth, (req, res) => {
+  res.json(req.user)
+})
+'''
+    findings_unprotected = run_all_rules(code_unprotected, 'javascript', 'routes/admin.js')
+    findings_auth = run_all_rules(code_with_auth, 'javascript', 'routes/profile.js')
+
+    filtered = filter_a001_if_no_repo_auth(
+        [findings_unprotected, findings_auth],
+        [code_unprotected, code_with_auth]
+    )
+    all_after = filtered[0] + filtered[1]
+    a001_after = [f for f in all_after if f.rule_id == 'PRBL-A001']
+    assert a001_after, \
+        "A001 must be kept when at least one file has auth indicators"

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .rules import RuleMatch, run_all_rules
+from .rules import RuleMatch, run_all_rules, filter_a001_if_no_repo_auth, _AUTH_INDICATORS
 from .osv import PackageResult, check_hallucinated_packages
 
 LANGUAGE_MAP = {
@@ -123,7 +123,8 @@ class PrblScanner:
             skip_dirs = {"node_modules", ".venv", "venv", "env", "__pycache__",
                          ".git", "dist", "build", ".next", ".pip_pillow"}
 
-        results = []
+        # Pass 1: collect all file paths and codes
+        file_entries = []
         for path in sorted(directory.rglob("*")):
             if not path.is_file():
                 continue
@@ -131,6 +132,21 @@ class PrblScanner:
                 continue
             if path.suffix.lower() not in LANGUAGE_MAP:
                 continue
-            results.append(self.scan_file(path, check_packages=check_packages))
+            code = path.read_text(encoding="utf-8", errors="ignore")
+            file_entries.append((path, code))
+
+        # Fix 2: repo-wide auth model check — if no file has any auth indicator,
+        # suppress all A001 findings (TodoMVC, demo apps, Astro static sites).
+        repo_has_auth = any(_AUTH_INDICATORS.search(code) for _, code in file_entries)
+
+        results = []
+        for path, code in file_entries:
+            ext = path.suffix.lower()
+            language = LANGUAGE_MAP.get(ext, "python")
+            scanner = PrblScanner(check_packages=check_packages)
+            result = scanner.scan_code(code, language, file_path=str(path))
+            if not repo_has_auth:
+                result.findings = [f for f in result.findings if f.rule_id != "PRBL-A001"]
+            results.append(result)
 
         return [r for r in results if r.findings]  # only files with findings

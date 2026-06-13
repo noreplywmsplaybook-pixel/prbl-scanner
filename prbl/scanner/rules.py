@@ -747,6 +747,59 @@ _SQL_CONTEXT_SIGNALS = re.compile(
     r')'
 )
 
+# Fix 3: SQL execution sink — must be present in the file before firing I001
+_SQL_EXECUTION_SINKS = re.compile(
+    r'(?i)(\.execute\s*\(|cursor\.|db\.query\s*\(|db\.run\s*\(|conn\.execute\s*\(|'
+    r'connection\.execute\s*\(|session\.execute\s*\(|\.raw\s*\(|knex\.|sequelize\.|'
+    r'prisma\.\w+\.(findMany|create|update|delete|findFirst|executeRaw|queryRaw)\s*\()'
+)
+
+
+def _file_has_sql_sink(code: str) -> bool:
+    return bool(_SQL_EXECUTION_SINKS.search(code))
+
+
+# Fix 5: Variable-tracking SQL injection — catches the multi-line f-string pattern:
+#   query = f'INSERT INTO books ... VALUES ("{title}", ...)'
+#   cur.execute(query)
+# when taint is more than 5 lines above the assignment.
+
+_EXEC_WITH_VAR = re.compile(
+    r'(?i)(?:\.execute|\.query|\.run|\.all)\s*\(\s*(\w+)\s*[\),]'
+)
+_FSTRING_ASSIGN_WITH_SQL = re.compile(
+    r'(?i)(\w+)\s*=\s*f["\'].*(?:SELECT|INSERT|UPDATE|DELETE|WHERE|INTO)'
+)
+_STR_CONCAT_ASSIGN_WITH_SQL = re.compile(
+    r'(?i)(\w+)\s*(?:\+=|=)\s*.*["\'].*(?:SELECT|INSERT|UPDATE|DELETE|WHERE|INTO).*["\'].*\+'
+)
+
+
+def _check_variable_sql_injection(lines: list[str], i: int) -> Optional[str]:
+    """
+    Fix 5: If line i calls execute(varname), look back up to 15 lines for
+    `varname = f'...SQL...'` — catches multi-line f-strings where taint is
+    further up the function and not in the 5-line window.
+    Returns the assignment line if found, else None.
+    """
+    exec_line = lines[i - 1]
+    var_m = _EXEC_WITH_VAR.search(exec_line)
+    if not var_m:
+        return None
+    varname = var_m.group(1)
+    # Skip parameterized query variables — '?' or '%s' in a plain string is safe
+    start = max(0, i - 15)
+    for j in range(i - 2, start - 1, -1):
+        assignment_line = lines[j]
+        m = _FSTRING_ASSIGN_WITH_SQL.search(assignment_line)
+        if m and m.group(1) == varname:
+            return assignment_line
+        m2 = _STR_CONCAT_ASSIGN_WITH_SQL.search(assignment_line)
+        if m2 and m2.group(1) == varname:
+            return assignment_line
+    return None
+
+
 _CMD_INJECTION_PATTERNS = [
     r'(?i)(exec|spawn|execFile|spawnSync|system|popen|subprocess\.call|subprocess\.run|os\.system)\s*\([^)]*\+',
     r'(?i)(exec|spawn|execFile|spawnSync)\s*\(`[^`]*\$\{',
@@ -780,6 +833,12 @@ _INJECTION_SAFE_CONTEXT = re.compile(
 
 def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
     findings = []
+    # Fix 3: I001 — require a SQL execution sink present in the file before checking.
+    # Frontend TS/JS files that use fetch('/todos/${id}') have no SQL sink and should
+    # never fire I001. Compute once per file call.
+    code = '\n'.join(lines)
+    file_has_sql = _file_has_sql_sink(code)
+
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
         if stripped.startswith(('#', '//', '*')):
@@ -809,6 +868,10 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
                 ctx_window = '\n'.join(lines[ctx_start:ctx_end])
                 if not _SQL_CONTEXT_SIGNALS.search(ctx_window):
                     break
+                # Fix 3: require a SQL execution sink in the file — prevents frontend
+                # files with fetch('/api/${id}') from firing I001.
+                if not file_has_sql:
+                    break
                 # settings.*/config.*/environ[ as secondary taint source — Python only.
                 # In JS/TS, config.* is too common in framework/webpack code to use as taint.
                 sql_settings_taint = (language == "python" and _SQL_SETTINGS_TAINT.search(window))
@@ -828,6 +891,31 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
                         severity="high",
                     ))
                     break
+
+        # Fix 5: Variable-tracking SQL injection check.
+        # Catches: query = f'INSERT ... {val}' \n cur.execute(query)
+        # when the taint (request.get_json() etc.) is more than 5 lines above.
+        # Only run if file has a SQL sink (Fix 3 already gates at file level).
+        if file_has_sql and not any(f.line_number == i for f in findings if f.rule_id == 'PRBL-I001'):
+            assign_line = _check_variable_sql_injection(lines, i)
+            if assign_line is not None:
+                # Expand window to 20 lines above this line to find taint
+                wide_window = '\n'.join(lines[max(0, i - 20):i + 2])
+                if _has_taint(wide_window) or (language == "python" and _SQL_SETTINGS_TAINT.search(wide_window)):
+                    findings.append(_match(
+                        rule_id="PRBL-I001",
+                        vuln_class="injection",
+                        line_number=i,
+                        line=stripped,
+                        title="SQL injection: user input concatenated into query (via variable)",
+                        detail=(
+                            "User-controlled input is being interpolated directly into a SQL query "
+                            "that is then executed. Even though the f-string assignment and the "
+                            "execute call are on separate lines, the injection is equally exploitable."
+                        ),
+                        fix="Use parameterized queries or a query builder. Never interpolate user input into SQL strings.",
+                        severity="high",
+                    ))
 
         # Command injection
         for pattern in _CMD_INJECTION_PATTERNS:
@@ -1064,6 +1152,8 @@ _PUBLIC_ROUTE_RE = re.compile(
     r'''|/verify-email'''
     r'''|/confirm-email'''
     r'''|/auth/'''                 # /auth/google, /auth/callback, etc.
+    r'''|/oauth/'''                # /oauth/github, /oauth/callback, etc.
+    r'''|/api/auth/'''             # /api/auth/signin, /api/auth/signup, etc.
     r'''|/?["\')]'''               # bare root: "/" alone or empty path
     r''')''',
     re.IGNORECASE,
@@ -1411,6 +1501,10 @@ _COOKIE_PARSER_SECRET = re.compile(
 _PY_SECRET_KEY = re.compile(
     r'''(?i)(secret_key(?:_base)?)\s*=\s*["'][^"']{4,}["']''',
 )
+# Fix 4: Flask dict-assignment form: app.config['SECRET_KEY'] = 'literal'
+_PY_APP_CONFIG_SECRET = re.compile(
+    r'''(?i)app\.config\s*\[\s*["']SECRET_KEY["']\s*\]\s*=\s*["']([^"']{4,})["']''',
+)
 # Context that makes the session-secret window relevant
 _SESSION_CONTEXT = re.compile(
     r'(?i)(session\s*\(|express-session|cookie-session|cookieParser|jwt\.sign|jsonwebtoken|app\.secret_key|SECRET_KEY|'
@@ -1425,10 +1519,43 @@ def check_session_secret(lines: list[str], language: str) -> list[RuleMatch]:
         stripped = line.strip()
         if stripped.startswith(('#', '//', '*')):
             continue
+
+        # Fix 4: app.config['SECRET_KEY'] = 'literal' — check BEFORE _CRED_SAFE_CONTEXT
+        # because _CRED_SAFE_CONTEXT matches 'config[' which is present on this line.
+        # Only fire if the value is not from os.environ/getenv.
+        if language == "python":
+            app_config_m = _PY_APP_CONFIG_SECRET.search(line)
+            if app_config_m:
+                secret_val = app_config_m.group(1)
+                # Skip if value comes from env var (covered by _CRED_SAFE_CONTEXT normally)
+                if not re.search(r'(?i)(os\.environ|getenv|process\.env)', line):
+                    if not _FALLBACK_SAFE_VALUE.match(secret_val):
+                        findings.append(_match(
+                            rule_id="PRBL-C002",
+                            vuln_class="hardcoded_credentials",
+                            line_number=i,
+                            line=stripped,
+                            title="Hardcoded session/signing secret",
+                            detail=(
+                                "The session or token-signing secret is a literal string in source code. "
+                                "Anyone with repo access can forge valid session cookies or JWTs for any "
+                                "user — full account takeover with no other vulnerability required. "
+                                "AI-generated Express and Flask boilerplate ships this constantly."
+                            ),
+                            fix=(
+                                "Load the secret from an environment variable and fail fast if missing: "
+                                "`app.config['SECRET_KEY'] = os.environ['SECRET_KEY']`. "
+                                "Rotate the leaked value — it is compromised the moment it was committed."
+                            ),
+                            severity="high",
+                        ))
+                continue  # handled — don't fall through to the generic checks
+
         if _CRED_SAFE_CONTEXT.search(line):
             continue  # process.env / os.environ — secret comes from config
         if _CRED_SAFE_VARNAME.search(line):
             continue
+
         hit = (
             _SESSION_SECRET.search(line)
             or _COOKIE_PARSER_SECRET.search(line)
@@ -1537,6 +1664,16 @@ def check_path_traversal(lines: list[str], language: str, file_path: str = "") -
 
 
 
+# ── Minified-file detection ───────────────────────────────────────────────────
+
+def _is_minified_file(file_path: str, code: str) -> bool:
+    """Return True if the file is a minified or bundled output that should be skipped."""
+    if file_path.endswith(('.min.js', '.min.css', '.min.ts')):
+        return True
+    # Any single line over 500 chars → treat as minified/bundled
+    return any(len(line) > 500 for line in code.splitlines())
+
+
 # ── Test-file detection ───────────────────────────────────────────────────────
 
 # Directory components that mark a file as test scaffolding
@@ -1573,6 +1710,10 @@ def _is_test_file(file_path: str) -> bool:
 # ── DISPATCH ──────────────────────────────────────────────────────────────────
 
 def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMatch]:
+    # Fix 1: Skip minified/bundled files entirely
+    if _is_minified_file(file_path, code):
+        return []
+
     lines = code.splitlines()
     findings = []
 
@@ -1655,3 +1796,35 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
             findings.append(a001[0])
 
     return findings
+
+
+def _file_has_auth_model(code: str) -> bool:
+    """
+    Fix 2: Return True if this file contains any route handler with auth indicators.
+    Used for repo-level A001 suppression: if ZERO files in a repo have auth,
+    the repo has no auth model at all and A001 findings are suppressed.
+    """
+    return bool(_AUTH_INDICATORS.search(code))
+
+
+def filter_a001_if_no_repo_auth(all_file_findings: list, all_file_codes: list[str]) -> list:
+    """
+    Fix 2: Post-processing step. If zero files in the repo have any auth indicators,
+    suppress all PRBL-A001 findings — the repo has no auth model at all
+    (e.g. TodoMVC, demo apps, Astro marketing sites).
+
+    Parameters
+    ----------
+    all_file_findings : list of list[RuleMatch]
+        Per-file rule match results (as returned by run_all_rules).
+    all_file_codes : list of str
+        Raw code content of each file (same order as all_file_findings).
+    """
+    repo_has_auth = any(_file_has_auth_model(code) for code in all_file_codes)
+    if repo_has_auth:
+        return all_file_findings
+    # No auth anywhere in the repo — drop all A001 findings
+    filtered = []
+    for file_findings in all_file_findings:
+        filtered.append([f for f in file_findings if f.rule_id != "PRBL-A001"])
+    return filtered

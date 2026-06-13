@@ -395,3 +395,32 @@ def insert_record(name):
     findings = run(code, language='python', file_path='db.py')
     assert any(f['rule_id'] == 'PRBL-I001' for f in findings), \
         "PRBL-I001 must fire on .format() with INSERT SQL keyword"
+
+
+# ── Fix 3: I001 requires SQL execution sink in file ───────────────────────────
+
+def test_frontend_fetch_no_sql_sink_no_i001():
+    """Fix 3: frontend file with fetch() template literal — no SQL sink — must not fire I001."""
+    code = '''
+async function deleteTodo(id) {
+  const resp = await fetch(`/todos/${id}`, { method: 'DELETE' })
+  return resp.json()
+}
+'''
+    findings = run(code, language='javascript', file_path='src/api.ts')
+    i001 = [f for f in findings if f['rule_id'] == 'PRBL-I001']
+    assert not i001, "I001 must not fire in a file with no SQL execution sink"
+
+
+def test_python_cursor_execute_still_fires():
+    """Fix 3: Python file with cursor.execute still fires I001."""
+    code = '''
+import sqlite3
+conn = sqlite3.connect('db.sqlite3')
+cur = conn.cursor()
+def get_user(user_id):
+    cur.execute(f"SELECT * FROM users WHERE id={user_id}")
+'''
+    findings = run(code, language='python', file_path='app.py')
+    assert any(f['rule_id'] == 'PRBL-I001' for f in findings), \
+        "I001 must still fire when a SQL execution sink is present"

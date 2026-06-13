@@ -64,3 +64,29 @@ def test_env_session_secret_no_firing():
     c002 = [f for f in findings if f['rule_id'] == 'PRBL-C002']
     assert not c001 and not c002, \
         "Neither C001 nor C002 should fire on pure process.env session secret"
+
+
+# ── Fix 4: app.config['SECRET_KEY'] = 'literal' ───────────────────────────────
+
+def test_flask_app_config_secret_key_fires():
+    """Fix 4: app.config['SECRET_KEY'] = 'literal' must fire C002."""
+    code = "app.config['SECRET_KEY'] = 'some-hard-to-guess-string'"
+    findings = run(code, language='python', file_path='app.py')
+    assert any(f['rule_id'] == 'PRBL-C002' for f in findings), \
+        "C002 must fire on app.config['SECRET_KEY'] = 'literal'"
+
+
+def test_flask_app_config_secret_key_env_no_fire():
+    """Fix 4: app.config['SECRET_KEY'] = os.environ.get(...) must NOT fire."""
+    code = "app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', '')"
+    findings = run(code, language='python', file_path='app.py')
+    c002 = [f for f in findings if f['rule_id'] == 'PRBL-C002']
+    assert not c002, "C002 must not fire when value comes from os.environ"
+
+
+def test_flask_app_config_double_quote_fires():
+    """Fix 4: double-quote form must also fire."""
+    code = 'app.config["SECRET_KEY"] = "test-secret-key"'
+    findings = run(code, language='python', file_path='app.py')
+    assert any(f['rule_id'] == 'PRBL-C002' for f in findings), \
+        "C002 must fire on app.config[\"SECRET_KEY\"] = \"literal\""
