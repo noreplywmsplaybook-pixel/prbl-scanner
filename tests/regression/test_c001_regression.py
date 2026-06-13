@@ -304,3 +304,53 @@ def test_js_destruct_debug_not_flagged():
     findings = run(code, language='javascript', file_path='app.js')
     c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
     assert not c001, f"PRBL-C001 must not fire on DEBUG destructuring. Got: {c001}"
+
+
+# ── PRECISION FIXES: placeholder suppression, seeder dirs, bcrypt ─────────────
+
+def test_placeholder_password_not_flagged():
+    """True negative: password: 'password' is a placeholder — not a real credential."""
+    code = "const config = { password: 'password', host: 'localhost' }"
+    findings = run(code, language='javascript', file_path='config/database.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on placeholder 'password'. Got: {c001}"
+
+
+def test_placeholder_mysecret_not_flagged():
+    """True negative: password: 'mysecret' is a known placeholder."""
+    code = "const config = { password: 'mysecret', host: 'localhost' }"
+    findings = run(code, language='javascript', file_path='config.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on 'mysecret'. Got: {c001}"
+
+
+def test_real_password_still_fires():
+    """True positive: password: 'X9k$mP2#vL8' is high-entropy and not a placeholder."""
+    code = "const config = { password: 'X9kmP2vL8abc', host: 'localhost' }"
+    findings = run(code, language='javascript', file_path='config.js')
+    assert any(f['rule_id'] == 'PRBL-C001' for f in findings), \
+        "PRBL-C001 must fire on high-entropy non-placeholder password"
+
+
+def test_bcrypt_hash_not_flagged():
+    """True negative: bcrypt hash value is not a plaintext secret."""
+    code = "const config = { password: '$2b$12$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LdWMn8zOvhG', host: 'db' }"
+    findings = run(code, language='javascript', file_path='config.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire on bcrypt hash. Got: {c001}"
+
+
+def test_seeder_dir_skipped():
+    """True negative: files in database/seeders/ are skipped (seeder dir)."""
+    code = "const password = 'hunter2secret';"
+    findings = run(code, language='javascript', file_path='database/seeders/UserSeeder.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire in seeders/ dir. Got: {c001}"
+
+
+def test_fixtures_dir_skipped():
+    """True negative: files in fixtures/ are skipped."""
+    code = "const password = 'hunter2secret';"
+    findings = run(code, language='javascript', file_path='tests/fixtures/UserFixture.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire in fixtures/ dir. Got: {c001}"

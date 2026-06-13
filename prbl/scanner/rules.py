@@ -133,6 +133,22 @@ _CRED_VALIDATION_MSG = re.compile(
 # Extract the string value from a matched line (content between quotes)
 _STRING_VALUE = re.compile(r'["\']([^"\']{4,})["\']')
 
+# Well-known placeholder credential strings used in dev config and boilerplate.
+# These are intentionally fake values — semantically identical to 'placeholder'
+# or 'your-secret-here'. If the extracted string value matches, suppress the finding.
+_CRED_PLACEHOLDER_VALUES = re.compile(
+    r'^(?:password|passwd|secret|changeme|change.?me|yourpassword|your.password|'
+    r'db.?password|admin|letmein|qwerty|123456|test|example|foobar|'
+    r'supersecret|mysecret|mypassword|pass|p@ss|p@ssw0rd|'
+    r'enter.?password|insert.?password|add.?password|'
+    r'<password>|<secret>|\[password\]|\[secret\])$',
+    re.IGNORECASE,
+)
+
+# Bcrypt hash pattern — already-hashed passwords in seeders/fixtures are not
+# plaintext secrets. A bcrypt hash cannot be reversed to recover the original.
+_BCRYPT_HASH = re.compile(r'^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$')
+
 # ── Fallback secret patterns ──────────────────────────────────────────────────
 # Detects: process.env.X || 'literal'  /  process.env.X ?? 'literal'
 #          os.environ.get('X', 'literal')  /  os.getenv('X', 'literal')
@@ -300,6 +316,22 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
                 # validation message rather than a secret, skip it.
                 string_values = _STRING_VALUE.findall(line)
                 if any(_CRED_VALIDATION_MSG.search(v) for v in string_values):
+                    break
+                # Suppress if the matched credential value is a well-known placeholder.
+                # Extract the value from the match itself (the string after the colon/equals)
+                # to avoid checking the key name (e.g. "password" in {"password": "hunter2"}).
+                m_obj = re.search(pattern, line)
+                cred_value = None
+                if m_obj:
+                    # The credential value is the last string literal in the matched span
+                    cred_val_m = _STRING_VALUE.findall(m_obj.group(0))
+                    if cred_val_m:
+                        cred_value = cred_val_m[-1]
+                if cred_value and _CRED_PLACEHOLDER_VALUES.match(cred_value):
+                    break
+                # Suppress if the value is a bcrypt hash — already-hashed passwords
+                # in seeders/fixtures are not plaintext secrets.
+                if cred_value and _BCRYPT_HASH.match(cred_value):
                     break
                 # Suppress C001 for session/cookie secrets — C002 covers these with
                 # better context and messaging. Avoids double-firing on:
@@ -1572,6 +1604,10 @@ def check_session_secret(lines: list[str], language: str) -> list[RuleMatch]:
         value_m = _STRING_VALUE.search(hit.group(0))
         if value_m and _FALLBACK_SAFE_VALUE.match(value_m.group(1)):
             continue
+        if value_m and _CRED_PLACEHOLDER_VALUES.match(value_m.group(1)):
+            continue
+        if value_m and _BCRYPT_HASH.match(value_m.group(1)):
+            continue
         findings.append(_match(
             rule_id="PRBL-C002",
             vuln_class="hardcoded_credentials",
@@ -1677,7 +1713,7 @@ def _is_minified_file(file_path: str, code: str) -> bool:
 # ── Test-file detection ───────────────────────────────────────────────────────
 
 # Directory components that mark a file as test scaffolding
-_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "__tests__", "__mocks__", "playwright", "e2e", "benchmark", "benchmarks", "bench", "example", "examples", "seed", "seeds"}
+_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "__tests__", "__mocks__", "playwright", "e2e", "benchmark", "benchmarks", "bench", "example", "examples", "seed", "seeds", "seeders", "seed-data", "fixtures", "fixture", "factory", "factories", "fakers", "faker"}
 
 # Filename patterns that mark a file as a test (stem checks, not substring)
 _TEST_FILENAME = re.compile(
