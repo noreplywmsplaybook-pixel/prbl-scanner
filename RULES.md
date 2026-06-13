@@ -552,6 +552,111 @@ Input like `../../etc/passwd` or `..\\..\\.env` escapes the intended directory a
 
 ---
 
+### PRBL-A002 — JWT Decoded Without Signature Verification
+
+**CWE-347 · OWASP A07 — Authentication Failures**
+
+**OWASP category rationale:** CWE-347 is about failing to verify a cryptographic signature. Both A02 (Cryptographic Failures) and A07 (Authentication Failures) apply — the root cause is a missing cryptographic check, but the direct consequence is authentication failure: the signature is the mechanism that authenticates the token issuer. An attacker who exploits this can forge any identity in the JWT payload, making this primarily an identity/authentication failure. A07 is the better primary mapping because the impact is full identity forgery and authentication bypass, not merely weak cryptography in a non-auth context.
+
+Detects JWT decoding patterns that skip signature verification, allowing an attacker to forge any token payload and impersonate any user — including admins.
+
+#### JavaScript / TypeScript — `jsonwebtoken` library
+
+In the `jsonwebtoken` library, `jwt.decode()` and `jwt.verify()` are fundamentally different:
+
+- `jwt.verify(token, secret, options)` — validates the signature, checks expiry, and returns the payload only if valid.
+- `jwt.decode(token)` — **never validates the signature**. It simply base64-decodes the payload. An attacker can replace the payload with any content (including `{"role": "admin", "id": 1}`) and `jwt.decode()` will accept it.
+
+The scanner flags any file that:
+1. Imports `jsonwebtoken` via `require('jsonwebtoken')` or `import ... from 'jsonwebtoken'`
+2. Calls `jwt.decode(` anywhere in the file
+3. Does NOT also call `jwt.verify(` anywhere in the same file
+
+If both `jwt.decode()` and `jwt.verify()` are present, the finding is suppressed — the developer may be using `decode()` for inspection or logging alongside a verified path.
+
+**Flagged patterns:**
+```javascript
+const jwt = require('jsonwebtoken');
+const payload = jwt.decode(token);       // PRBL-A002
+req.user = payload;
+```
+
+**Safe patterns (not flagged):**
+```javascript
+const jwt = require('jsonwebtoken');
+// Both verify and decode present → suppressed
+const verified = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+const decoded  = jwt.decode(token);  // used for inspection only
+```
+
+#### Python — `pyjwt` library
+
+In `pyjwt`, the safe form of `jwt.decode()` requires a key and algorithms. The scanner flags:
+
+1. **Explicit bypass — `verify_signature: False`:**
+```python
+payload = jwt.decode(token, options={'verify_signature': False})  # PRBL-A002
+payload = jwt.decode(token, options={"verify_signature": False})  # PRBL-A002 (double quotes)
+```
+
+2. **Algorithm confusion — `algorithms=['none']`:**
+```python
+payload = jwt.decode(token, algorithms=['none'])  # PRBL-A002
+```
+   The `none` algorithm tells the JWT library to accept unsigned tokens. This is a well-known attack (CVE-2015-9235 and related) where an attacker strips the signature and sets `alg: none` in the header.
+
+3. **Single-argument call — no key:**
+```python
+payload = jwt.decode(token)  # PRBL-A002 — no secret, no verification
+```
+
+**Safe patterns (not flagged):**
+```python
+payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])     # safe
+payload = jwt.decode(token, key=PUBLIC_KEY, algorithms=['RS256'])  # safe
+```
+
+#### Why it's dangerous
+
+A JWT consists of three base64url-encoded parts: header, payload, signature. The signature is computed over the header and payload using the server's secret key. If you skip verification:
+
+- Any attacker who can obtain any valid token (even their own) can modify the payload to claim a different identity, escalate privileges, or extend expiry.
+- No brute force required — the forged token is accepted immediately.
+- `jwt.decode()` in jsonwebtoken is documented as a utility function, not an authentication mechanism. Its own README states: "This will not verify whether the signature is valid."
+
+In the Infisical codebase (caught by this rule during stress testing), the production code has a comment `// Verify application token` above a `jwt.decode()` call — a developer confused the two functions and left Microsoft Teams access tokens unverified.
+
+#### Fix
+
+**JavaScript:**
+```javascript
+// Before (vulnerable)
+const payload = jwt.decode(token);
+
+// After (safe)
+const payload = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+```
+
+**Python:**
+```python
+# Before (vulnerable)
+payload = jwt.decode(token, options={'verify_signature': False})
+
+# After (safe)
+payload = jwt.decode(token, os.environ['JWT_SECRET'], algorithms=['HS256'])
+```
+
+**Severity:** HIGH.
+
+#### Known Limitations
+
+- **Inspection-only use case (JS):** If a file uses `jwt.decode()` exclusively for logging, debugging, or extracting unverified claims before calling a separate verification service, the finding fires. Mitigation: add `jwt.verify()` anywhere in the file (e.g. in the same auth module), which suppresses the finding. The rule documents this as a false positive risk and recommends the suppression pattern.
+- **Python single-argument false positive:** `_JWT_DECODE_PY_NO_KEY` fires on `jwt.decode(token)` with exactly one positional argument. If a different library (not pyjwt) is also named `jwt` and exposes a `decode()` function with a single argument that is safe, this will false-positive. This is an acceptable tradeoff — the pattern is nearly always pyjwt in Python code.
+- **Python multi-argument unsafe calls:** `jwt.decode(token, key=None)` or `jwt.decode(token, algorithms=['HS256'])` with no key would be unsafe but are not flagged by the current patterns (they have two arguments so they don't match the single-arg pattern, and they don't have `verify_signature: False`). These are edge cases; the most common unsafe forms are covered.
+- **Files that only call `jwt.verify()` (JS):** correctly not flagged — zero false positives on well-written auth middleware.
+
+---
+
 ### PRBL-P001 — Hallucinated / Non-Existent Package
 
 **Emerging — no CWE · OWASP A03 — Supply Chain Failures**
@@ -605,7 +710,7 @@ Categories and rankings follow the **OWASP Top 10 2021** revision (the current s
 
 | Rule | OWASP Category |
 |---|---|
-| PRBL-C001, PRBL-C002 | A07 — Identification and Authentication Failures |
+| PRBL-C001, PRBL-C002, PRBL-A002 | A07 — Identification and Authentication Failures |
 | PRBL-R001 | A04 — Insecure Design (Cryptographic Failures) |
 | PRBL-R002 | A02 — Cryptographic Failures |
 | PRBL-I001, PRBL-I002, PRBL-I003, PRBL-I004 | A05 — Injection |

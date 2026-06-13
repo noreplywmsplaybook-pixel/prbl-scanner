@@ -47,6 +47,7 @@ _OWASP: dict[str, tuple[str, str, int]] = {
     "PRBL-C002": ("CWE-798",    "A07 — Authentication Failures", 7),
     "PRBL-T001": ("CWE-22",     "A01 — Broken Access Control",   1),
     "PRBL-R002": ("CWE-208",    "A02 — Cryptographic Failures",  2),
+    "PRBL-A002": ("CWE-347",    "A07 — Authentication Failures", 7),
 }
 
 
@@ -1700,6 +1701,86 @@ def check_path_traversal(lines: list[str], language: str, file_path: str = "") -
 
 
 
+# ── 8. JWT DECODED WITHOUT SIGNATURE VERIFICATION (PRBL-A002) ────────────────
+
+# JS: jsonwebtoken library import signal
+_JWT_IMPORT_JS = re.compile(
+    r'(?i)(require\s*\(\s*["\']jsonwebtoken["\']\s*\)|'
+    r'from\s+["\']jsonwebtoken["\']\s*import|'
+    r'import\s+.+\s+from\s+["\']jsonwebtoken["\'])',
+)
+
+# JS: jwt.decode() call (the unsafe one in jsonwebtoken)
+_JWT_DECODE_JS = re.compile(r'(?i)\bjwt\.decode\s*\(')
+
+# JS: jwt.verify() call (the safe one — if present in file, suppress)
+_JWT_VERIFY_JS = re.compile(r'(?i)\bjwt\.verify\s*\(')
+
+# Python: unsafe jwt.decode forms — explicit bypass flags
+_JWT_DECODE_PY_UNSAFE = re.compile(
+    r'(?i)jwt\.decode\s*\([^)]*(?:'
+    r'verify_signature["\'\s]*:\s*False|'
+    r'algorithms\s*=\s*\[["\']none["\']\]'
+    r')',
+)
+
+# Python: jwt.decode() with exactly one positional arg (the token) — no key
+_JWT_DECODE_PY_NO_KEY = re.compile(
+    r'(?i)\bjwt\.decode\s*\(\s*\w+\s*\)',
+)
+
+
+def check_jwt_no_verify(lines: list, language: str, file_path: str = '') -> list:
+    findings = []
+    code = '\n'.join(lines)
+
+    if language in ('javascript', 'typescript'):
+        # Only check files that import jsonwebtoken
+        if not _JWT_IMPORT_JS.search(code):
+            return findings
+        # If jwt.verify() is present anywhere in the file, suppress —
+        # the developer may be using decode() for inspection only alongside a verify path.
+        if _JWT_VERIFY_JS.search(code):
+            return findings
+        # Flag each jwt.decode() call
+        for i, line in enumerate(lines, 1):
+            if _JWT_DECODE_JS.search(line):
+                findings.append(_match(
+                    "PRBL-A002",
+                    vuln_class="insecure-jwt",
+                    line_number=i,
+                    line=line.rstrip(),
+                    title="JWT decoded without signature verification",
+                    detail=(
+                        "jwt.decode() in jsonwebtoken never verifies the signature — "
+                        "use jwt.verify(token, secret, { algorithms: ['HS256'] }) instead. "
+                        "An attacker can forge any JWT payload and bypass authentication entirely."
+                    ),
+                    fix="Replace jwt.decode() with jwt.verify(token, secret, { algorithms: ['HS256'] })",
+                    severity="high",
+                ))
+
+    elif language == 'python':
+        for i, line in enumerate(lines, 1):
+            if _JWT_DECODE_PY_UNSAFE.search(line) or _JWT_DECODE_PY_NO_KEY.search(line):
+                findings.append(_match(
+                    "PRBL-A002",
+                    vuln_class="insecure-jwt",
+                    line_number=i,
+                    line=line.rstrip(),
+                    title="JWT decoded without signature verification",
+                    detail=(
+                        "jwt.decode() called without signature verification. "
+                        "Use jwt.decode(token, secret, algorithms=['HS256']) to verify the signature. "
+                        "An attacker can forge any JWT payload and bypass authentication entirely."
+                    ),
+                    fix="Add the signing key and algorithms parameter: jwt.decode(token, SECRET, algorithms=['HS256'])",
+                    severity="high",
+                ))
+
+    return findings
+
+
 # ── Minified-file detection ───────────────────────────────────────────────────
 
 def _is_minified_file(file_path: str, code: str) -> bool:
@@ -1801,6 +1882,7 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
         weak_rand = [f for f in weak_rand if f.rule_id != "PRBL-R001"]
     findings += weak_rand
     findings += check_timing_comparison(lines, language)
+    findings += check_jwt_no_verify(lines, language, file_path=file_path)
     injection_findings = check_injection(lines, language)
     if is_benchmark:
         # Benchmark directories: suppress I003 (eval/exec in benchmark runners is not

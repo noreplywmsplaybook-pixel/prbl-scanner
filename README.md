@@ -43,6 +43,14 @@ how LLMs were trained, not because of developer mistakes.
   Detects user input passed to eval(), exec(), new Function(), or
   compile(). Gives an attacker full code execution on the server.
 
+- **PRBL-A002** — JWT decoded without signature verification  
+  `CWE-347 · OWASP A07 · #7 most critical web security risk`  
+  Detects `jwt.decode()` in JavaScript (jsonwebtoken library) used without
+  `jwt.verify()` in the same file, and Python pyjwt unsafe forms:
+  `verify_signature=False`, `algorithms=['none']`, and single-argument decode
+  (no key). Complete authentication bypass — an attacker can forge any JWT
+  payload and pass any identity check that relies on decode instead of verify.
+
 - **PRBL-A001** — Missing access control including serverless handlers  
   `CWE-862 · OWASP A01 · #1 most critical web security risk`  
   Detects route handlers and serverless functions that perform sensitive
@@ -71,6 +79,7 @@ category give it the full context to answer accurately.
 | PRBL-I002 | Command Injection | CWE-78 | A05 — Injection | #5 |
 | PRBL-I003 | Code Injection | CWE-94/95 | A05 — Injection | #5 |
 | PRBL-A001 | Missing Access Control | CWE-862 | A01 — Broken Access Control | #1 |
+| PRBL-A002 | JWT Without Signature Verification | CWE-347 | A07 — Authentication Failures | #7 |
 | PRBL-P001 | Hallucinated Packages | Emerging — no CWE | A03 — Supply Chain Failures | #3 |
 
 ### Why PRBL-P001 has no CWE
