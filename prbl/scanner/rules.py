@@ -1540,11 +1540,11 @@ def check_path_traversal(lines: list[str], language: str, file_path: str = "") -
 # ── Test-file detection ───────────────────────────────────────────────────────
 
 # Directory components that mark a file as test scaffolding
-_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "__tests__", "__mocks__", "playwright", "e2e", "benchmark", "benchmarks", "bench"}
+_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "__tests__", "__mocks__", "playwright", "e2e", "benchmark", "benchmarks", "bench", "example", "examples", "seed", "seeds"}
 
 # Filename patterns that mark a file as a test (stem checks, not substring)
 _TEST_FILENAME = re.compile(
-    r'^(test_.+|.+_test|.+\.spec|.+\.test|.+\.e2e|.+\.e2e-spec|runtests|run_tests)$',
+    r'^(test_.+|.+_test|.+\.spec|.+\.test|.+\.e2e|.+\.e2e-spec|runtests|run_tests|seed|seed-.+)$',
     re.IGNORECASE,
 )
 
@@ -1601,12 +1601,17 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
     else:
         # Still catch real credential formats (AWS keys, Stripe live keys,
         # hardcoded JWTs) even in test files — those are always wrong.
-        creds = check_hardcoded_credentials(lines)
-        findings += [
-            m for m in creds
-            if m.rule_id == "PRBL-C001"
-            and any(sig in m.line for sig in ("AKIA", "sk_live_", "rk_live_", "eyJ", "ghp_", "github_pat_"))
-        ]
+        # Exception: example/examples directories contain intentionally demo
+        # credentials (supabase anon keys, tutorial JWTs) — skip the passthrough
+        # entirely for those dirs.
+        fp_parts_lower = {p.lower() for p in Path(file_path).parts[:-1]} if file_path else set()
+        if not (fp_parts_lower & {"example", "examples"}):
+            creds = check_hardcoded_credentials(lines)
+            findings += [
+                m for m in creds
+                if m.rule_id == "PRBL-C001"
+                and any(sig in m.line for sig in ("AKIA", "sk_live_", "rk_live_", "eyJ", "ghp_", "github_pat_"))
+            ]
 
     fp_lower = file_path.replace('\\', '/').lower() if file_path else ''
     is_benchmark = any(f'/{seg}/' in fp_lower for seg in ('benchmark', 'benchmarks', 'bench'))
