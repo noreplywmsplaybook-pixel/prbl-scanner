@@ -388,3 +388,74 @@ def test_mixed_case_with_digits_not_suppressed():
     findings = run(code, language='python', file_path='app.py')
     assert any(f['rule_id'] in ('PRBL-C001', 'PRBL-C002') for f in findings), \
         "C001 must fire on high-entropy value with digits and mixed case"
+
+
+# ── FIX: VENDOR/UPSTREAM DIR SKIP ─────────────────────────────────────────────
+
+def test_vendor_dir_skipped():
+    """True negative: files under /vendor/ are skipped (vendored upstream source)."""
+    code = "const password = 'hunter2secret';"
+    findings = run(code, language='javascript', file_path='daemon/vendor/lib/auth.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire in vendor/ dir. Got: {c001}"
+
+
+def test_upstream_dir_skipped():
+    """True negative: files under /upstream/ are skipped (vendored upstream source)."""
+    code = "const password = 'hunter2secret';"
+    findings = run(code, language='javascript', file_path='daemon/upstream/lib/auth.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"PRBL-C001 must not fire in upstream/ dir. Got: {c001}"
+
+
+def test_vendor_in_filename_not_skipped():
+    """True positive: 'vendor' in filename (not directory) is NOT skipped."""
+    code = "const apiKey = 'sk_li' + 've_abcdefghijklmnopqrstuvwx'"
+    findings = run(code, language='javascript', file_path='src/vendor.ts')
+    assert any(f['rule_id'] == 'PRBL-C001' for f in findings), \
+        "C001 must still fire when 'vendor' is part of the filename, not a directory"
+
+
+# ── FIX: ENV-VAR-NAME VALUE SUPPRESSION ───────────────────────────────────────
+
+def test_env_var_name_as_value_suppressed():
+    """True negative: apiKey: "VLLM_API_KEY" — value is a config schema label, not a secret."""
+    code = 'const config = { apiKey: "VLLM_API_KEY" }'
+    findings = run(code, language='javascript', file_path='config.js')
+    c001 = [f for f in findings if f['rule_id'] in ('PRBL-C001', 'PRBL-C002')]
+    assert not c001, f"C001/C002 must not fire when value is an ALL_CAPS env-var name. Got: {c001}"
+
+
+def test_jwt_secret_env_var_name_suppressed():
+    """True negative: secret: "JWT_SECRET" — config label, not a real secret."""
+    code = 'app.use(session({ secret: "JWT_SECRET" }))'
+    findings = run(code, language='javascript', file_path='app.js')
+    c001 = [f for f in findings if f['rule_id'] in ('PRBL-C001', 'PRBL-C002')]
+    assert not c001, f"C001/C002 must not fire on env-var-name value JWT_SECRET. Got: {c001}"
+
+
+def test_real_secret_not_suppressed_by_env_var_check():
+    """True positive: sk-live-abc123 has lowercase — not an env var name, still fires."""
+    code = "const apiKey = 'sk-live-abc123xyz'"
+    findings = run(code, language='javascript', file_path='app.js')
+    assert any(f['rule_id'] == 'PRBL-C001' for f in findings), \
+        "C001 must still fire when value is not ALL_CAPS_ONLY"
+
+
+# ── FIX: REDACTION TEST SUPPRESSION ───────────────────────────────────────────
+
+def test_not_to_contain_cred_suppressed():
+    """True negative: expect(x).not.toContain("ghp_...") is a redaction check, not a leak."""
+    code = 'expect(result).not.toContain("ghp_1234567890abcdef1234567890abcdefghij")'
+    findings = run(code, language='javascript', file_path='auth.test.js')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"C001 must not fire on .not.toContain() assertion. Got: {c001}"
+
+
+def test_real_cred_assignment_still_fires():
+    """True positive: const token = "ghp_..." is a real credential assignment, not a test assertion."""
+    token = "ghp_" + "1234567890abcdef1234567890abcdef1234"
+    code = f'const token = "{token}"'
+    findings = run(code, language='javascript', file_path='app.js')
+    assert any(f['rule_id'] == 'PRBL-C001' for f in findings), \
+        "C001 must still fire when credential is assigned, not asserted-absent"

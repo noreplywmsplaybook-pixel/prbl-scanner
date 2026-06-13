@@ -150,6 +150,21 @@ _CRED_PLACEHOLDER_VALUES = re.compile(
 # plaintext secrets. A bcrypt hash cannot be reversed to recover the original.
 _BCRYPT_HASH = re.compile(r'^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$')
 
+# Suppress C001/C002 when the credential VALUE is an all-uppercase env-var name.
+# These are config schema labels, not real secrets:
+#   apiKey: "VLLM_API_KEY"  /  secret: "JWT_SECRET"  /  token: "GITHUB_TOKEN"
+# Must be entirely uppercase letters, digits, and underscores (no lowercase).
+_ENV_VAR_NAME_VALUE = re.compile(r'^[A-Z][A-Z0-9_]{2,}$')
+
+# Suppress C001/C002 when the matched line is a test assertion verifying that a
+# credential was REDACTED — not a real leaked credential.
+# Patterns: expect(x).not.toContain("ghp_..."), assert "fake" not in result, etc.
+_CRED_REDACTION_TEST = re.compile(
+    r'(?:\.not\.toContain\s*\(|\.not\.toEqual\s*\(|assert\s+\S+\s+not\s+in\b|'
+    r'assertNotIn\s*\(|\.not\.toMatch\s*\()',
+    re.IGNORECASE,
+)
+
 # ── Value entropy suppressors (applied to the VALUE side only) ────────────────
 
 def _is_non_ascii(value: str) -> bool:
@@ -361,6 +376,14 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
                 # Suppress if the value is a bcrypt hash — already-hashed passwords
                 # in seeders/fixtures are not plaintext secrets.
                 if cred_value and _BCRYPT_HASH.match(cred_value):
+                    break
+                # Suppress C001/C002 when the value is an all-uppercase env-var name.
+                # e.g. apiKey: "VLLM_API_KEY" — a config schema label, not a real secret.
+                if cred_value and _ENV_VAR_NAME_VALUE.match(cred_value):
+                    break
+                # Suppress C001/C002 when the line is a test assertion verifying redaction.
+                # e.g. expect(result).not.toContain("ghp_...") — checking the redactor works.
+                if _CRED_REDACTION_TEST.search(line):
                     break
                 # Suppress C001 for session/cookie secrets — C002 covers these with
                 # better context and messaging. Avoids double-firing on:
@@ -1658,6 +1681,9 @@ def check_session_secret(lines: list[str], language: str) -> list[RuleMatch]:
             continue
         if value_m and _BCRYPT_HASH.match(value_m.group(1)):
             continue
+        # Suppress C002 when the value is an all-uppercase env-var name (config schema label)
+        if value_m and _ENV_VAR_NAME_VALUE.match(value_m.group(1)):
+            continue
         findings.append(_match(
             rule_id="PRBL-C002",
             vuln_class="hardcoded_credentials",
@@ -1843,7 +1869,7 @@ def _is_minified_file(file_path: str, code: str) -> bool:
 # ── Test-file detection ───────────────────────────────────────────────────────
 
 # Directory components that mark a file as test scaffolding
-_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "__tests__", "__mocks__", "playwright", "e2e", "benchmark", "benchmarks", "bench", "example", "examples", "seed", "seeds", "seeders", "seed-data", "fixtures", "fixture", "factory", "factories", "fakers", "faker"}
+_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "__tests__", "__mocks__", "playwright", "e2e", "benchmark", "benchmarks", "bench", "example", "examples", "seed", "seeds", "seeders", "seed-data", "fixtures", "fixture", "factory", "factories", "fakers", "faker", "vendor", "vendors", "upstream", "third_party", "third-party", "extern", "external", "externals", "thirdparty"}
 
 # Filename patterns that mark a file as a test (stem checks, not substring)
 _TEST_FILENAME = re.compile(
@@ -1875,9 +1901,28 @@ def _is_test_file(file_path: str) -> bool:
 
 # ── DISPATCH ──────────────────────────────────────────────────────────────────
 
+_VENDOR_DIRS = {"vendor", "vendors", "upstream", "third_party", "third-party", "extern", "external", "externals", "thirdparty"}
+
+
+def _is_vendor_file(file_path: str) -> bool:
+    """Return True if any directory component of the path is a known vendor/upstream dir."""
+    if not file_path:
+        return False
+    path = Path(file_path)
+    for part in path.parts[:-1]:
+        if part.lower() in _VENDOR_DIRS:
+            return True
+    return False
+
+
 def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMatch]:
     # Fix 1: Skip minified/bundled files entirely
     if _is_minified_file(file_path, code):
+        return []
+
+    # Skip vendored/upstream source trees entirely — third-party code is not
+    # the developer's responsibility and generates high noise volumes.
+    if _is_vendor_file(file_path):
         return []
 
     lines = code.splitlines()
