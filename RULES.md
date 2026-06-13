@@ -657,6 +657,118 @@ payload = jwt.decode(token, os.environ['JWT_SECRET'], algorithms=['HS256'])
 
 ---
 
+### PRBL-C003 — TLS/Certificate Verification Disabled
+
+**CWE-295 · OWASP A02 — Cryptographic Failures**
+
+**Severity:** HIGH (downgraded to LOW when a dev-only conditional guard is detected in a 5-line window)
+
+Detects code that explicitly disables TLS certificate verification, enabling man-in-the-middle (MITM) attacks on all HTTPS connections through that client.
+
+#### What it detects
+
+**JavaScript / TypeScript:**
+
+```javascript
+// Object literal form (pg, https.Agent, tls.connect, axios)
+new pg.Pool({ ssl: { rejectUnauthorized: false } })
+https.request({ hostname: 'api.example.com', rejectUnauthorized: false })
+axios.create({ httpsAgent: new https.Agent({ rejectUnauthorized: false }) })
+tls.connect({ rejectUnauthorized: false })
+opts.rejectUnauthorized = false
+
+// Environment variable form — disables verification globally for the whole process
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+NODE_TLS_REJECT_UNAUTHORIZED = 0
+```
+
+**Python:**
+
+```python
+# requests library
+requests.get(url, verify=False)
+requests.post(url, verify=False)
+
+# session-level disable
+session.verify = False
+
+# ssl module
+ssl._create_unverified_context()
+ssl.CERT_NONE
+```
+
+#### Why it's dangerous
+
+When `rejectUnauthorized: false` or `verify=False` is set, the TLS handshake completes even if the server's certificate is self-signed, expired, for a different domain, or signed by an unknown CA. An attacker in a position to intercept traffic (coffee shop Wi-Fi, cloud VPC, compromised DNS) can present any certificate and the client will accept it — reading and modifying the plaintext of every request and response.
+
+`NODE_TLS_REJECT_UNAUTHORIZED=0` is especially dangerous because it disables verification globally for all HTTPS connections in the entire Node.js process — not just the one place it was intended to fix.
+
+#### Dev-only guard — automatic severity downgrade
+
+If the 2 lines before or after the vulnerable line contain a recognized dev-environment check, the severity is downgraded from HIGH to LOW and the detail message includes a note:
+
+```javascript
+// This fires LOW, not HIGH
+if (process.env.NODE_ENV === 'development') {
+  opts.rejectUnauthorized = false
+}
+```
+
+```python
+# This fires LOW, not HIGH
+if DEBUG:
+    response = requests.get(url, verify=False)
+```
+
+Recognized dev guards: `NODE_ENV === 'development'/'dev'/'test'`, `NODE_ENV !== 'production'`, `process.env.NODE_ENV`, `if (dev|isDev|isDevMode|development)`, `if DEBUG:`, `if settings.DEBUG:`, `if app.debug:`, `if os.getenv('DEBUG'...`.
+
+**Note:** A comment saying "for development only" is NOT a guard. Only runtime conditionals count.
+
+#### Fix
+
+**JavaScript — remove or provide CA cert:**
+```javascript
+// Before (vulnerable)
+new pg.Pool({ ssl: { rejectUnauthorized: false } })
+
+// After — option 1: TLS verification is on by default
+new pg.Pool({ ssl: true })
+
+// After — option 2: self-signed cert — provide the CA instead
+new pg.Pool({
+  ssl: {
+    rejectUnauthorized: true,
+    ca: fs.readFileSync('/path/to/ca.crt').toString()
+  }
+})
+```
+
+**Python — remove verify=False or provide CA cert:**
+```python
+# Before (vulnerable)
+requests.get(url, verify=False)
+
+# After — verify=True is the default
+requests.get(url)
+
+# After — self-signed cert — provide the CA
+requests.get(url, verify='/path/to/ca.crt')
+
+# For ssl module: replace _create_unverified_context with default context
+ctx = ssl.create_default_context()
+# Or with custom CA:
+ctx = ssl.create_default_context(cafile='/path/to/ca.crt')
+```
+
+#### Known Limitations
+
+- Does not detect TLS verification disabled via environment variables set *outside the codebase* (e.g. in shell scripts, CI config, or Dockerfile ENV). Only detects `NODE_TLS_REJECT_UNAUTHORIZED=0` set in code.
+- Does not detect custom `TrustManager` implementations in Java that accept any certificate — Java is out of scope for this scanner.
+- Does not detect Go's `InsecureSkipVerify: true` in `tls.Config` — Go is out of scope.
+- Python: `requests.get(url, verify=some_variable)` where `some_variable` evaluates to `False` at runtime is not flagged — only literal `False` is detected.
+
+---
+
 ### PRBL-P001 — Hallucinated / Non-Existent Package
 
 **Emerging — no CWE · OWASP A03 — Supply Chain Failures**
@@ -712,7 +824,7 @@ Categories and rankings follow the **OWASP Top 10 2021** revision (the current s
 |---|---|
 | PRBL-C001, PRBL-C002, PRBL-A002 | A07 — Identification and Authentication Failures |
 | PRBL-R001 | A04 — Insecure Design (Cryptographic Failures) |
-| PRBL-R002 | A02 — Cryptographic Failures |
+| PRBL-R002, PRBL-C003 | A02 — Cryptographic Failures |
 | PRBL-I001, PRBL-I002, PRBL-I003, PRBL-I004 | A05 — Injection |
 | PRBL-A001, PRBL-T001 | A01 — Broken Access Control |
 

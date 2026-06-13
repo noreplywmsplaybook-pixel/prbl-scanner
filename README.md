@@ -51,6 +51,14 @@ how LLMs were trained, not because of developer mistakes.
   (no key). Complete authentication bypass — an attacker can forge any JWT
   payload and pass any identity check that relies on decode instead of verify.
 
+- **PRBL-C003** — TLS/certificate verification disabled  
+  `CWE-295 · OWASP A02 · #2 most critical web security risk`  
+  Detects `rejectUnauthorized: false` (JS/TS), `NODE_TLS_REJECT_UNAUTHORIZED=0`,
+  `verify=False`, `ssl._create_unverified_context()`, and `ssl.CERT_NONE` (Python).
+  Allows man-in-the-middle attacks on all connections through the client.
+  Severity is automatically downgraded to LOW when a dev-only conditional guard
+  (`if DEBUG:`, `NODE_ENV === 'development'`) is detected in the surrounding lines.
+
 - **PRBL-A001** — Missing access control including serverless handlers  
   `CWE-862 · OWASP A01 · #1 most critical web security risk`  
   Detects route handlers and serverless functions that perform sensitive
@@ -80,6 +88,7 @@ category give it the full context to answer accurately.
 | PRBL-I003 | Code Injection | CWE-94/95 | A05 — Injection | #5 |
 | PRBL-A001 | Missing Access Control | CWE-862 | A01 — Broken Access Control | #1 |
 | PRBL-A002 | JWT Without Signature Verification | CWE-347 | A07 — Authentication Failures | #7 |
+| PRBL-C003 | TLS Certificate Verification Disabled | CWE-295 | A02 — Cryptographic Failures | #2 |
 | PRBL-P001 | Hallucinated Packages | Emerging — no CWE | A03 — Supply Chain Failures | #3 |
 
 ### Why PRBL-P001 has no CWE

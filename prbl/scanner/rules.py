@@ -48,6 +48,7 @@ _OWASP: dict[str, tuple[str, str, int]] = {
     "PRBL-T001": ("CWE-22",     "A01 — Broken Access Control",   1),
     "PRBL-R002": ("CWE-208",    "A02 — Cryptographic Failures",  2),
     "PRBL-A002": ("CWE-347",    "A07 — Authentication Failures", 7),
+    "PRBL-C003": ("CWE-295",    "A02 — Cryptographic Failures",  2),
 }
 
 
@@ -1856,6 +1857,111 @@ def check_jwt_no_verify(lines: list, language: str, file_path: str = '') -> list
     return findings
 
 
+# ── 9. TLS/CERTIFICATE VERIFICATION DISABLED (PRBL-C003) ─────────────────────
+
+_TLS_REJECT_UNAUTH_JS = re.compile(
+    r'rejectUnauthorized\s*[=:]\s*false',
+)
+_TLS_NODE_REJECT_ENV_JS = re.compile(
+    r'NODE_TLS_REJECT_UNAUTHORIZED\s*[=:]\s*["\']?0["\']?',
+)
+_TLS_VERIFY_FALSE_PY = re.compile(
+    r'(?i)requests\.\w+\s*\([^)]*verify\s*=\s*False',
+)
+_TLS_VERIFY_SESSION_PY = re.compile(
+    r'(?i)\.verify\s*=\s*False',
+)
+_TLS_SSL_UNVERIFIED_PY = re.compile(
+    r'(?i)ssl\._create_unverified_context\s*\(\s*\)',
+)
+_TLS_SSL_CERT_NONE_PY = re.compile(
+    r'(?i)ssl\.CERT_NONE\b',
+)
+_TLS_DEV_GUARD = re.compile(
+    r'(?i)('
+    r'NODE_ENV\s*[!=]=+\s*["\'](?:development|dev|test)["\']|'
+    r'NODE_ENV\s*[!=]=+\s*["\']production["\']|'
+    r'process\.env\.NODE_ENV|'
+    r'if\s*\(\s*(?:dev|isDev|isDevMode|development)\s*[\)&|]|'
+    r'if\s+DEBUG\s*:|'
+    r'if\s+settings\.DEBUG\s*:|'
+    r'if\s+app\.debug\s*:|'
+    r'if\s+os\.getenv\(["\']DEBUG'
+    r')',
+)
+
+
+def check_tls_disabled(lines, language, file_path=''):
+    findings = []
+
+    for i, line in enumerate(lines):
+        stripped_line = line.strip()
+        if stripped_line.startswith(('#', '//', '*')):
+            continue
+        matched = False
+        title = "TLS certificate verification disabled"
+        detail = (
+            "TLS certificate verification is disabled, enabling man-in-the-middle attacks. "
+            "An attacker on the network can intercept and modify traffic to/from this connection."
+        )
+        fix_js = (
+            "Remove rejectUnauthorized: false (the default is true). "
+            "If using a self-signed certificate, add the CA certificate instead: "
+            "new https.Agent({ ca: fs.readFileSync('ca.crt') })"
+        )
+        fix_py = (
+            "Remove verify=False and use ssl.create_default_context() instead. "
+            "If using a self-signed cert, add it: ssl.create_default_context(cafile='ca.crt')"
+        )
+        fix = fix_js
+
+        if language in ('javascript', 'typescript'):
+            if _TLS_REJECT_UNAUTH_JS.search(line):
+                matched = True
+                fix = fix_js
+            elif _TLS_NODE_REJECT_ENV_JS.search(line):
+                matched = True
+                fix = fix_js
+                detail = (
+                    "NODE_TLS_REJECT_UNAUTHORIZED=0 disables certificate verification globally "
+                    "for all HTTPS connections in this process, enabling MITM attacks."
+                )
+        elif language == 'python':
+            if (_TLS_VERIFY_FALSE_PY.search(line) or
+                    _TLS_VERIFY_SESSION_PY.search(line) or
+                    _TLS_SSL_UNVERIFIED_PY.search(line) or
+                    _TLS_SSL_CERT_NONE_PY.search(line)):
+                matched = True
+                fix = fix_py
+
+        if not matched:
+            continue
+
+        # Check 5-line window for dev-only guard (2 before + 2 after)
+        window_start = max(0, i - 2)
+        window_end = min(len(lines), i + 3)
+        window = '\n'.join(lines[window_start:window_end])
+
+        severity = "high"
+        if _TLS_DEV_GUARD.search(window):
+            severity = "low"
+            detail += (" — NOTE: appears to be disabled only in development; "
+                       "verify this guard is correct before deploying to production.")
+
+        findings.append(_match(
+            "PRBL-C003",
+            vuln_class="tls-verification-disabled",
+            line_number=i + 1,
+            line=line.rstrip(),
+            title=title,
+            detail=detail,
+            fix=fix,
+            severity=severity,
+        ))
+
+    return findings
+
+
 # ── Minified-file detection ───────────────────────────────────────────────────
 
 def _is_minified_file(file_path: str, code: str) -> bool:
@@ -1977,6 +2083,7 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
     findings += weak_rand
     findings += check_timing_comparison(lines, language)
     findings += check_jwt_no_verify(lines, language, file_path=file_path)
+    findings += check_tls_disabled(lines, language, file_path=file_path)
     injection_findings = check_injection(lines, language)
     if is_benchmark:
         # Benchmark directories: suppress I003 (eval/exec in benchmark runners is not
