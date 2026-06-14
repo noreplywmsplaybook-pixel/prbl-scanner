@@ -126,3 +126,105 @@ def test_arbitrary_method_eval_not_flagged():
     i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
     assert not i003, \
         f"PRBL-I003 must not fire on vm.eval(). Got: {i003}"
+
+
+# ── CLASS A FP: shell-wrapper function definition ─────────────────────────────
+
+def test_exec_wrapper_definition_not_flagged():
+    """Regression FP Class A: defining an exec() wrapper must not fire I003.
+    The function is an abstraction — its parameter 'command' is the wrapper's
+    interface, not user taint reaching an actual dangerous eval."""
+    code = '''
+export function exec(command: string, args?: string[], options?: Partial<Options>) {
+    return childProcess.exec(command, args, options)
+}
+'''
+    findings = run(code, language='javascript', file_path='exec.ts')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert not i003, \
+        f"PRBL-I003 must not fire when defining an exec wrapper function. Got: {i003}"
+
+
+def test_ts_overload_exec_not_flagged():
+    """Regression FP Class A: TypeScript overload declaration for exec must not fire.
+    Overloads have no body and cannot introduce taint."""
+    code = '''
+export function exec(command: string, callback: ExecCallback): ChildProcess;
+export function exec(command: string, options: ExecOptions): ChildProcess;
+export function exec(command: string, options?: ExecOptions, callback?: ExecCallback): ChildProcess {
+    return child_process.exec(command, options as any, callback)
+}
+'''
+    findings = run(code, language='javascript', file_path='child_process.ts')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert not i003, \
+        f"PRBL-I003 must not fire on TS exec() overload declarations. Got: {i003}"
+
+
+def test_spawn_wrapper_definition_not_flagged():
+    """Regression FP Class A: defining a spawn() wrapper must not fire I002."""
+    code = '''
+function spawn(cmd: string, args: string[]) {
+    return child_process.spawn(cmd, args)
+}
+'''
+    findings = run(code, language='javascript', file_path='spawn-util.ts')
+    i002 = [f for f in findings if f['rule_id'] == 'PRBL-I002']
+    assert not i002, \
+        f"PRBL-I002 must not fire when defining a spawn() wrapper. Got: {i002}"
+
+
+def test_exec_wrapper_tp_still_fires():
+    """True positive: user-tainted exec in a non-wrapper context must still fire."""
+    code = '''
+app.post('/run', (req, res) => {
+    const cmd = req.body.command
+    exec(cmd)
+})
+'''
+    findings = run(code, language='javascript', file_path='routes.js')
+    i002_or_i003 = [f for f in findings if f['rule_id'] in ('PRBL-I002', 'PRBL-I003')]
+    assert i002_or_i003, \
+        "PRBL-I002 or PRBL-I003 must fire when user input is passed to exec. Got no findings."
+
+
+# ── CLASS B FP: eval inside string literal ────────────────────────────────────
+
+def test_eval_in_error_string_not_flagged():
+    """Regression FP Class B: eval() in an error message string must not fire I003.
+    Pattern from nextjs compiled bundles: throw new Error('eval() is not supported...')"""
+    code = '''
+export function exec(command: string) {
+    throw new Error(
+        "eval() is not supported in this environment. If this page was served with a " +
+        "Content-Security-Policy header, make sure that `unsafe-eval` is included."
+    )
+}
+'''
+    findings = run(code, language='javascript', file_path='polyfill.js')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert not i003, \
+        f"PRBL-I003 must not fire when eval() appears inside a string literal. Got: {i003}"
+
+
+def test_eval_in_string_single_line_not_flagged():
+    """Regression FP Class B: single-line eval-in-string must not fire."""
+    code = 'var msg = "eval() is not supported in this environment";\n'
+    findings = run(code, language='javascript', file_path='error.js')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert not i003, \
+        f"PRBL-I003 must not fire when eval() appears only inside a string literal. Got: {i003}"
+
+
+def test_compiled_bundle_path_skipped():
+    """Regression FP Class B: files in /compiled/ path must be skipped entirely."""
+    code = '''
+function run(command) {
+    eval(command)
+}
+'''
+    findings = run(code, language='javascript',
+                   file_path='/tmp/stress_batch/nextjs/packages/next/src/compiled/react/bundle.js')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert not i003, \
+        f"PRBL-I003 must not fire on files inside /compiled/ path. Got: {i003}"

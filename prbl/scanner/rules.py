@@ -906,6 +906,32 @@ _CODE_INJECTION_PATTERNS = [
     r'(?i)importlib\.import_module\s*\(',
 ]
 
+# Eval-in-string-literal pattern: eval() appears inside a quoted string, not as an actual call.
+# e.g. "eval() is not supported in this environment" — an error message, not injection.
+# Matches: "...eval()..." or '...eval()...' — eval( preceded by any non-quote text after a quote.
+_EVAL_IN_STRING = re.compile(
+    r'''['""][^'"]*\beval\s*\([^'"]*['"]'''
+    r'''|['][^']*\beval\s*\([^']*[']'''
+    r'''|["][^"]*\beval\s*\([^"]*["]''',
+)
+
+# Shell-wrapper function definition pattern: the window contains a function whose
+# *name* is a shell/exec trigger word. Used to suppress I002/I003 when the code is
+# defining an exec abstraction (e.g. export function exec(command)), not invoking
+# one with user-controlled data.
+_SHELL_WRAPPER_FN_RE = re.compile(
+    r'(?:function|const|let|var|export\s+(?:async\s+)?function|export\s+const)\s+'
+    r'(exec|spawn|shell|system|run_command|run_cmd|exec_cmd|execute|sh)\s*[\s(=]',
+    re.IGNORECASE,
+)
+
+
+def _inside_shell_wrapper(window: str) -> bool:
+    """Return True if the window contains a function definition whose name is a
+    shell/exec trigger word. Suppresses I002/I003 when the code is defining an
+    exec abstraction rather than invoking one with user-controlled taint."""
+    return bool(_SHELL_WRAPPER_FN_RE.search(window))
+
 
 _INJECTION_SAFE_CONTEXT = re.compile(
     r'(?i)^\s*(print\s*\(|console\.(log|warn|error|info|debug)\s*\('
@@ -1009,6 +1035,9 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
                 window_end = min(len(lines), i + 5)
                 window = '\n'.join(lines[window_start:window_end])
                 if _has_taint(window):
+                    # Suppress: the enclosing function IS the shell abstraction being defined
+                    if _inside_shell_wrapper(window):
+                        break
                     findings.append(_match(
                         rule_id="PRBL-I002",
                         vuln_class="injection",
@@ -1028,10 +1057,16 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
         # Code injection
         for pattern in _CODE_INJECTION_PATTERNS:
             if re.search(pattern, line):
+                # Suppress: eval() appears inside a string literal (error message, not a call)
+                if _EVAL_IN_STRING.search(line):
+                    break
                 window_start = max(0, i - 5)
                 window_end = min(len(lines), i + 5)
                 window = '\n'.join(lines[window_start:window_end])
                 if _has_taint(window):
+                    # Suppress: the enclosing function IS the shell/eval abstraction being defined
+                    if _inside_shell_wrapper(window):
+                        break
                     findings.append(_match(
                         rule_id="PRBL-I003",
                         vuln_class="injection",
@@ -1975,6 +2010,12 @@ def check_tls_disabled(lines, language, file_path=''):
 def _is_minified_file(file_path: str, code: str) -> bool:
     """Return True if the file is a minified or bundled output that should be skipped."""
     if file_path.endswith(('.min.js', '.min.css', '.min.ts')):
+        return True
+    # Compiled/dist/build output directories — even when line-wrapped, these are
+    # generated artifacts not authored code. Covers: packages/next/src/compiled/,
+    # dist/, build/, .next/, __pycache__/, etc.
+    fp_normalized = file_path.replace('\\', '/')
+    if any(f'/{seg}/' in fp_normalized for seg in ('compiled', 'dist', 'build', '.next', '__pycache__')):
         return True
     # Any single line over 500 chars → treat as minified/bundled
     return any(len(line) > 500 for line in code.splitlines())
