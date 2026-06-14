@@ -37,7 +37,7 @@ class RuleMatch:
 _OWASP: dict[str, tuple[str, str, int]] = {
     # rule_id → (cwe, owasp_category, owasp_rank)
     "PRBL-C001": ("CWE-798",    "A07 — Authentication Failures", 7),
-    "PRBL-R001": ("CWE-338",    "A04 — Cryptographic Failures",  4),
+    "PRBL-R001": ("CWE-338",    "A02 — Cryptographic Failures",  2),
     "PRBL-I001": ("CWE-89",     "A05 — Injection",               5),
     "PRBL-I002": ("CWE-78",     "A05 — Injection",               5),
     "PRBL-I003": ("CWE-94/95",  "A05 — Injection",               5),

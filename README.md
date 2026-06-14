@@ -89,7 +89,7 @@ category give it the full context to answer accurately.
 | Rule | Name | CWE | OWASP 2025 | OWASP Rank |
 |------|------|-----|------------|------------|
 | PRBL-C001 | Hardcoded Credentials | CWE-798 | A07 — Authentication Failures | #7 |
-| PRBL-R001 | Weak Randomness | CWE-338 | A04 — Cryptographic Failures | #4 |
+| PRBL-R001 | Weak Randomness | CWE-338 | A02 — Cryptographic Failures | #2 |
 | PRBL-R002 | Insecure Equality Comparison | CWE-208 | A02 — Cryptographic Failures | #2 |
 | PRBL-R003 | AES-GCM Missing Auth Tag Length | CWE-345 | A02 — Cryptographic Failures | #2 |
 | PRBL-I001 | SQL Injection | CWE-89 | A05 — Injection | #5 |

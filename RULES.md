@@ -151,7 +151,7 @@ Anyone with read access to the repository can forge valid session cookies or JWT
 
 ### PRBL-R001 — Weak Randomness
 
-**CWE-338 · OWASP A04 — Cryptographic Failures**
+**CWE-338 · OWASP A02 — Cryptographic Failures**
 
 Detects use of non-cryptographic random number generators in security-sensitive contexts:
 
@@ -985,7 +985,7 @@ Categories and rankings follow the **OWASP Top 10 2021** revision (the current s
 | Rule | OWASP Category |
 |---|---|
 | PRBL-C001, PRBL-C002, PRBL-A002 | A07 — Identification and Authentication Failures |
-| PRBL-R001 | A04 — Insecure Design (Cryptographic Failures) |
+| PRBL-R001 | A02 — Cryptographic Failures |
 | PRBL-R002, PRBL-R003, PRBL-C003 | A02 — Cryptographic Failures |
 | PRBL-I001, PRBL-I002, PRBL-I003, PRBL-I004, PRBL-I005 | A03/A05 — Injection |
 | PRBL-A001, PRBL-T001 | A01 — Broken Access Control |
