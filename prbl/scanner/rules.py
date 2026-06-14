@@ -1879,19 +1879,27 @@ _TLS_SSL_CERT_NONE_PY = re.compile(
 )
 _TLS_DEV_GUARD = re.compile(
     r'(?i)('
-    r'NODE_ENV\s*[!=]=+\s*["\'](?:development|dev|test)["\']|'
-    r'NODE_ENV\s*[!=]=+\s*["\']production["\']|'
-    r'process\.env\.NODE_ENV|'
+    # JS: checking for dev/test environment (safe direction)
+    r'NODE_ENV\s*[!=]=+\s*["\'](?:development|dev|test|staging)["\']|'
+    r'NODE_ENV\s*!==?\s*["\']production["\']|'       # !== 'production' = safe
+    r'process\.env\.NODE_ENV\s*!==?\s*["\']production["\']|'
+    # JS: checking dev flag
     r'if\s*\(\s*(?:dev|isDev|isDevMode|development)\s*[\)&|]|'
+    r'isDevelopment\s*&&|'
+    r'isTest\s*&&|'
+    # Python: dev/debug flags
     r'if\s+DEBUG\s*:|'
     r'if\s+settings\.DEBUG\s*:|'
     r'if\s+app\.debug\s*:|'
-    r'if\s+os\.getenv\(["\']DEBUG'
+    r'if\s+os\.getenv\(["\']DEBUG["\']|'
+    r'if\s+os\.environ\.get\(["\']DEBUG["\']'
     r')',
 )
 
 
 def check_tls_disabled(lines, language, file_path=''):
+    if _is_test_file(file_path):
+        return []
     findings = []
 
     for i, line in enumerate(lines):

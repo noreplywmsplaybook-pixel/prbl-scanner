@@ -107,6 +107,32 @@ if (process.env.NODE_ENV === 'development') {
     assert c003[0]['severity'] == 'low', f"Expected LOW (dev guard), got {c003[0]['severity']}"
 
 
+def test_js_reject_unauthorized_false_not_equals_production_guard():
+    """DEV-GUARD TP9b: rejectUnauthorized: false with NODE_ENV !== 'production' → LOW."""
+    code = """\
+if (process.env.NODE_ENV !== 'production') {
+  opts.rejectUnauthorized = false
+}
+"""
+    findings = run(code, 'javascript', 'config.js')
+    c003 = [f for f in findings if f['rule_id'] == 'PRBL-C003']
+    assert c003, "PRBL-C003 must fire (but as LOW) when !== production guard present"
+    assert c003[0]['severity'] == 'low', f"Expected LOW (!== production guard), got {c003[0]['severity']}"
+
+
+def test_js_reject_unauthorized_false_equals_production_is_high():
+    """DEV-GUARD TP9c: rejectUnauthorized in production ternary → HIGH (not LOW).
+
+    ssl: NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+    means TLS is disabled IN production — dangerous, must be HIGH.
+    """
+    code = "ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,"
+    findings = run(code, 'javascript', 'database.js')
+    c003 = [f for f in findings if f['rule_id'] == 'PRBL-C003']
+    assert c003, "PRBL-C003 must fire when rejectUnauthorized: false is in production branch"
+    assert c003[0]['severity'] == 'high', f"Expected HIGH (production branch), got {c003[0]['severity']}"
+
+
 def test_python_verify_false_with_debug_guard():
     """DEV-GUARD TP10: verify=False inside if DEBUG: block → LOW."""
     code = """\
@@ -143,3 +169,38 @@ def test_requests_with_custom_ca_is_safe():
     findings = run(code, 'python', 'client.py')
     c003 = [f for f in findings if f['rule_id'] == 'PRBL-C003']
     assert not c003, f"PRBL-C003 must NOT fire when verify= has a CA path. Got: {c003}"
+
+
+# ── TEST-FILE SUPPRESSION — must NOT fire ─────────────────────────────────────
+
+def test_reject_unauthorized_false_in_test_dir_suppressed():
+    """FP14: rejectUnauthorized: false in test/ directory must not fire."""
+    code = "const agent = new https.Agent({ rejectUnauthorized: false })"
+    findings = run(code, 'javascript', '/project/test/helpers/https-server.ts')
+    c003 = [f for f in findings if f['rule_id'] == 'PRBL-C003']
+    assert not c003, f"PRBL-C003 must NOT fire in test/ directory. Got: {c003}"
+
+
+def test_reject_unauthorized_false_in_tests_dir_suppressed():
+    """FP15: rejectUnauthorized: false in __tests__/ directory must not fire."""
+    code = "const agent = new https.Agent({ rejectUnauthorized: false })"
+    findings = run(code, 'javascript', '/project/src/__tests__/tls.test.ts')
+    c003 = [f for f in findings if f['rule_id'] == 'PRBL-C003']
+    assert not c003, f"PRBL-C003 must NOT fire in __tests__/ directory. Got: {c003}"
+
+
+def test_reject_unauthorized_false_in_spec_dir_suppressed():
+    """FP16: rejectUnauthorized: false in spec/ directory must not fire."""
+    code = "const agent = new https.Agent({ rejectUnauthorized: false })"
+    findings = run(code, 'javascript', '/project/spec/integration/tls_spec.js')
+    c003 = [f for f in findings if f['rule_id'] == 'PRBL-C003']
+    assert not c003, f"PRBL-C003 must NOT fire in spec/ directory. Got: {c003}"
+
+
+def test_reject_unauthorized_false_not_in_test_dir_still_fires():
+    """TP17: rejectUnauthorized: false in production code (not test dir) must still fire."""
+    code = "const pool = new pg.Pool({ ssl: { rejectUnauthorized: false } })"
+    findings = run(code, 'javascript', '/project/src/config/database.js')
+    c003 = [f for f in findings if f['rule_id'] == 'PRBL-C003']
+    assert c003, "PRBL-C003 must still fire in non-test production code"
+    assert c003[0]['severity'] == 'high'
