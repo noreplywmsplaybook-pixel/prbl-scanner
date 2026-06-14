@@ -91,6 +91,7 @@ category give it the full context to answer accurately.
 | PRBL-C001 | Hardcoded Credentials | CWE-798 | A07 — Authentication Failures | #7 |
 | PRBL-R001 | Weak Randomness | CWE-338 | A04 — Cryptographic Failures | #4 |
 | PRBL-R002 | Insecure Equality Comparison | CWE-208 | A02 — Cryptographic Failures | #2 |
+| PRBL-R003 | AES-GCM Missing Auth Tag Length | CWE-345 | A02 — Cryptographic Failures | #2 |
 | PRBL-I001 | SQL Injection | CWE-89 | A05 — Injection | #5 |
 | PRBL-I002 | Command Injection | CWE-78 | A05 — Injection | #5 |
 | PRBL-I003 | Code Injection | CWE-94/95 | A05 — Injection | #5 |
