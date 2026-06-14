@@ -50,6 +50,7 @@ _OWASP: dict[str, tuple[str, str, int]] = {
     "PRBL-A002": ("CWE-347",    "A07 — Authentication Failures", 7),
     "PRBL-C003": ("CWE-295",    "A02 — Cryptographic Failures",  2),
     "PRBL-R003": ("CWE-345",    "A02 — Cryptographic Failures",  2),
+    "PRBL-I005": ("CWE-1321",   "A03 — Injection",               3),
 }
 
 
@@ -1828,6 +1829,192 @@ _T001_PACKAGING_FILES = re.compile(
 )
 
 
+# ── PRBL-I005: Prototype Pollution via tainted bracket assignment ─────────────
+
+# Matches: obj[key] = value — captures the object expression and key expression.
+# Key must be a single identifier or req.* expression (no commas, spaces, or
+# array-destructuring patterns like [a, b]).
+_BRACKET_ASSIGN = re.compile(
+    r'(\w[\w.]*)\s*\[(\w[\w.]*(?:\[[\'"]\w+[\'"]\])?)\]\s*='
+)
+
+# Direct request taint in the key expression — always fire (Shape 1)
+_REQ_KEY_TAINT = re.compile(
+    r'^req\.(params|query|body|headers)\.'
+)
+
+# Object names that are safe receivers — skip to avoid FP
+_SAFE_OBJ_NAMES = re.compile(
+    r'(?i)\b(map|cache|store|registry|lookup|dict|headers|env)\b'
+)
+
+# Key variable names that are loop indices — skip
+_LOOP_INDEX_NAMES = re.compile(r'^(i|j|k|n|idx|index)$')
+
+# Sanitization guard — hasOwnProperty check nearby → skip
+_HAS_OWN_PROP = re.compile(
+    r'hasOwnProperty\s*\(|Object\.prototype\.hasOwnProperty\.call\s*\('
+)
+
+# Allowlist check guard — if/includes(key) or ALLOWED.has(key) in window → skip
+_ALLOWLIST_CHECK = re.compile(
+    r'(?i)(\.includes\s*\(\s*\w+\s*\)|\.has\s*\(\s*\w+\s*\)|ALLOW|whitelist)'
+)
+
+# TypeScript typed object: const obj: SomeType = — if type is specific (not any/Record/[) skip
+_TS_TYPED_OBJ = re.compile(
+    r'(?:const|let)\s+(\w+)\s*:\s*([A-Z]\w*(?:<[^>]*>)?)\s*='
+)
+
+# Null-prototype safe object
+_NULL_PROTO = re.compile(r'Object\.create\s*\(\s*null\s*\)')
+
+# Map/Set target in lookback
+_MAP_SET_NEW = re.compile(r'new\s+(Map|Set)\s*\(')
+
+# for...of / for...in iterating array or object → skip bracket assignment inside
+_FOR_LOOP = re.compile(r'\bfor\s*\(')
+
+
+def check_prototype_pollution(lines: list[str], language: str, file_path: str = '') -> list[RuleMatch]:
+    """
+    PRBL-I005: Prototype pollution via bracket assignment with tainted key.
+    Fires when obj[key] = value and key traces to external input.
+    """
+    if language not in ('javascript', 'typescript'):
+        return []
+    if _is_test_file(file_path):
+        return []
+    code = '\n'.join(lines)
+    if _is_minified_file(file_path, code):
+        return []
+
+    findings = []
+
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        # Skip comment lines
+        if stripped.startswith(('//', '*', '/*')):
+            continue
+
+        m = _BRACKET_ASSIGN.search(line)
+        if not m:
+            continue
+
+        obj_expr = m.group(1)
+        key_expr = m.group(2).strip()
+
+        # FP guard #1: string literal key
+        if key_expr and key_expr[0] in ('"', "'", '`'):
+            continue
+
+        # FP guard #2: numeric literal key
+        if key_expr.isdigit():
+            continue
+
+        # FP guard #3: loop index variable names
+        if _LOOP_INDEX_NAMES.match(key_expr):
+            continue
+
+        # FP guard #4: safe object names (map, cache, store, etc.)
+        if _SAFE_OBJ_NAMES.search(obj_expr):
+            continue
+
+        # Build 15-line lookback window
+        window_start = max(0, i - 16)
+        window = '\n'.join(lines[window_start:i])
+
+        # FP guard #5: hasOwnProperty check nearby
+        if _HAS_OWN_PROP.search(window):
+            continue
+
+        # FP guard #6: allowlist check (includes/has/ALLOW) in lookback
+        if _ALLOWLIST_CHECK.search(window):
+            continue
+
+        # FP guard #7: null-prototype object in lookback
+        if _NULL_PROTO.search(window):
+            continue
+
+        # FP guard #8: Map/Set target in lookback
+        if _MAP_SET_NEW.search(window):
+            # Only skip if the map/set variable name matches the obj being assigned
+            map_m = re.search(r'(?:const|let|var)\s+(\w+)\s*=\s*new\s+(?:Map|Set)\s*\(', window)
+            if map_m and map_m.group(1) == obj_expr.split('.')[0]:
+                continue
+
+        # FP guard #9: TypeScript typed object (non-any, non-Record, non-index-sig)
+        for ts_m in _TS_TYPED_OBJ.finditer(window):
+            ts_var = ts_m.group(1)
+            ts_type = ts_m.group(2)
+            if ts_var == obj_expr.split('.')[0]:
+                # If type doesn't contain any/Record/[, skip
+                if not re.search(r'any|Record|Partial|Required|\[', ts_type):
+                    break
+        else:
+            ts_m = None  # no typed object found
+
+        # Re-check: if we found a typed object and broke (safe), skip
+        # We need to restructure: use a flag
+        is_ts_safe = False
+        for ts_m in _TS_TYPED_OBJ.finditer(window):
+            ts_var = ts_m.group(1)
+            ts_type = ts_m.group(2)
+            if ts_var == obj_expr.split('.')[0]:
+                if not re.search(r'any|Record|Partial|Required|\[', ts_type):
+                    is_ts_safe = True
+                    break
+        if is_ts_safe:
+            continue
+
+        # Skip process.env and known safe receivers by full name
+        if obj_expr in ('process.env', 'headers', 'res.headers', 'response.headers'):
+            continue
+
+        # Shape 1: key expression IS a direct request taint (req.params.*, etc.)
+        if _REQ_KEY_TAINT.match(key_expr):
+            tainted = True
+        elif _USER_INPUT_VARS.search(window):
+            # Shape 2: variable key traced to req.* / request.* in lookback
+            tainted = True
+        else:
+            # Shape 3: function parameter key — only fire if function signature
+            # contains request-handler parameters (req, request, ctx, context)
+            # to avoid flagging internal library utility functions.
+            has_request_handler_sig = bool(re.search(
+                r'function\s*\w*\s*\([^)]*\b(req|request|ctx|context)\b',
+                window
+            ))
+            tainted = has_request_handler_sig and _has_taint(window)
+
+        if not tainted:
+            continue
+
+        findings.append(_match(
+            rule_id="PRBL-I005",
+            vuln_class="prototype_pollution",
+            line_number=i,
+            line=stripped,
+            title="Prototype pollution: bracket assignment with tainted key",
+            detail=(
+                "An externally-controlled key is used in a bracket assignment (`obj[key] = value`). "
+                "If the key is `__proto__`, `constructor`, or `prototype`, the assignment modifies "
+                "Object.prototype — affecting every object in the process. This is prototype pollution "
+                "(CWE-1321). Real-world exploits have bypassed auth, injected properties, and achieved "
+                "RCE via this pattern (lodash, mongoose, express)."
+            ),
+            fix=(
+                "Option A — Allowlist: `if (ALLOWED_KEYS.has(key)) { obj[key] = value; }`. "
+                "Option B — Use Map: `const map = new Map(); map.set(key, value);`. "
+                "Option C — Null-prototype: `const safe = Object.create(null); safe[key] = value;`. "
+                "Option D — Sanitize key: reject '__proto__', 'constructor', 'prototype'."
+            ),
+            severity="high",
+        ))
+
+    return findings
+
+
 def check_path_traversal(lines: list[str], language: str, file_path: str = "") -> list[RuleMatch]:
     # Python packaging scripts (setup.py, pyproject.toml) read their own source tree
     # using os.path.join with hard-coded package names — never user-controlled paths.
@@ -2206,6 +2393,7 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
         injection_findings = [f for f in injection_findings if f.rule_id != "PRBL-I002"]
     findings += injection_findings
     findings += check_nosql_injection(lines, language)
+    findings += check_prototype_pollution(lines, language, file_path=file_path)
     findings += check_path_traversal(lines, language, file_path)
 
     # PRBL-C002: session secrets follow the same test-file policy as PRBL-C001

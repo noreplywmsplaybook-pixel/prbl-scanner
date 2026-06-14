@@ -94,6 +94,7 @@ category give it the full context to answer accurately.
 | PRBL-I001 | SQL Injection | CWE-89 | A05 — Injection | #5 |
 | PRBL-I002 | Command Injection | CWE-78 | A05 — Injection | #5 |
 | PRBL-I003 | Code Injection | CWE-94/95 | A05 — Injection | #5 |
+| PRBL-I005 | Prototype Pollution (Tainted Bracket Assignment) | CWE-1321 | A03 — Injection | #3 |
 | PRBL-A001 | Missing Access Control | CWE-862 | A01 — Broken Access Control | #1 |
 | PRBL-A002 | JWT Without Signature Verification | CWE-347 | A07 — Authentication Failures | #7 |
 | PRBL-C003 | TLS Certificate Verification Disabled | CWE-295 | A02 — Cryptographic Failures | #2 |

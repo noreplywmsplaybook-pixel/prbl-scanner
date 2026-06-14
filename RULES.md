@@ -490,6 +490,111 @@ Uses the same taint-source logic as PRBL-I001.
 
 ---
 
+### PRBL-I005 — Prototype Pollution via Tainted Bracket Assignment
+
+**CWE-1321 · OWASP A03 — Injection**
+
+Detects `obj[key] = value` assignments where `key` is externally controlled (via HTTP request parameters, function parameters in a request handler context, or variables traced to request input). If the key is `__proto__`, `constructor`, or `prototype`, the assignment modifies `Object.prototype`, poisoning every object in the process.
+
+**Language:** JavaScript and TypeScript only.
+
+**Severity:** HIGH.
+
+**Detection patterns:**
+
+*Shape 1 — Direct request taint on bracket key:*
+```js
+obj[req.params.key] = value
+obj[req.query.field] = value
+obj[req.body.name] = value
+```
+The bracket key is itself a `req.*` expression. Always fires (subject to FP guards).
+
+*Shape 2 — Variable key from request in lookback (15-line window):*
+```js
+const key = req.params.field;
+obj[key] = value;
+```
+`_USER_INPUT_VARS` must be present in the 15-line lookback window.
+
+*Shape 3 — Request handler function with bracket key:*
+```js
+function handler(req, res) {
+    const key = req.body.field;
+    obj[key] = value;
+}
+```
+The enclosing function must have `req`, `request`, `ctx`, or `context` in its parameter list.
+
+**False positive guards:**
+- String literal keys (`obj['fixed']`) — skipped
+- Numeric index keys (`arr[0]`) — skipped
+- Loop index variable names (`i`, `j`, `k`, `n`, `idx`, `index`) — skipped
+- Object target names containing `map`, `cache`, `store`, `registry`, `lookup`, `dict`, `headers`, `env` — skipped
+- `Object.prototype.hasOwnProperty.call()` or `.hasOwnProperty()` in lookback — skipped
+- Allowlist check (`.includes(key)`, `.has(key)`, `ALLOW`) in lookback — skipped
+- `Object.create(null)` in lookback (null-prototype target) — skipped
+- `new Map()` / `new Set()` assigned to the target variable — skipped
+- TypeScript typed objects where the type is not `any`, `Record`, or an index signature — skipped
+- `process.env`, `res.headers`, `response.headers` as target — skipped
+- Test files — skipped
+
+**Example findings:**
+```js
+// PRBL-I005: req.params.key used as bracket key
+app.post('/update', (req, res) => {
+    config[req.params.key] = req.body.value;  // ← flagged
+});
+
+// PRBL-I005: tainted variable in lookback
+app.post('/set', (req, res) => {
+    const field = req.query.field;
+    userObj[field] = req.body.value;  // ← flagged
+});
+```
+
+**Fix options:**
+
+Option A — Allowlist validation:
+```javascript
+const ALLOWED_KEYS = new Set(['name', 'value', 'type']);
+if (ALLOWED_KEYS.has(key)) {
+  obj[key] = value;
+}
+```
+
+Option B — Use Map (preferred for dynamic key-value storage):
+```javascript
+const map = new Map();
+map.set(key, value);
+```
+
+Option C — Null-prototype object:
+```javascript
+const safeObj = Object.create(null);
+safeObj[key] = value;
+```
+
+Option D — Key sanitization:
+```javascript
+if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+  throw new Error('Invalid key');
+}
+obj[key] = value;
+```
+
+#### Known Limitations
+
+**Covered:** Shapes 1 (direct req.* key), 2 (variable key traced to req.* in 15-line lookback), and 3 (request handler function with tainted key). JavaScript and TypeScript only.
+
+**Not covered:**
+- Deep object merge functions (`_.merge`, `Object.assign` with user-controlled source) — no bracket assignment pattern, different detection approach needed. (MEDIUM — common in real vulns but requires different rule.)
+- JSON.parse of user input used as merge source — no bracket assignment visible at the parse site. (LOW — contextual and hard to detect without taint tracking.)
+- Functions that are called from a request handler but are not themselves handlers — the 15-line window must span from the req.* source to the bracket assignment. Multi-function taint chains are not traced. (Acceptable tradeoff — regex-based model.)
+- Python, Ruby, Go — out of scope for this rule.
+
+---
+
 ### PRBL-A001 — Missing Access Control
 
 **CWE-862 · OWASP A01 — Broken Access Control**
@@ -882,7 +987,7 @@ Categories and rankings follow the **OWASP Top 10 2021** revision (the current s
 | PRBL-C001, PRBL-C002, PRBL-A002 | A07 — Identification and Authentication Failures |
 | PRBL-R001 | A04 — Insecure Design (Cryptographic Failures) |
 | PRBL-R002, PRBL-R003, PRBL-C003 | A02 — Cryptographic Failures |
-| PRBL-I001, PRBL-I002, PRBL-I003, PRBL-I004 | A05 — Injection |
+| PRBL-I001, PRBL-I002, PRBL-I003, PRBL-I004, PRBL-I005 | A03/A05 — Injection |
 | PRBL-A001, PRBL-T001 | A01 — Broken Access Control |
 
 ---
