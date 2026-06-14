@@ -560,12 +560,13 @@ _TIMING_SAFE_PRESENT = re.compile(
 _TIMING_UNSAFE_CMP = re.compile(
     r'(?:===|==|!==|!=)'
 )
-_TIMING_WEBHOOK_VARS = re.compile(
-    r'(?i)\b(verification_token|webhook_secret|webhook_token|expected_signature|'
+_TIMING_WEBHOOK_VARS_RAW = (
+    r'\b(verification_token|webhook_secret|webhook_token|expected_signature|'
     r'computed_signature|x_hub_signature|x_signature|hmac_signature|'
     r'open_verification_token|signature_token|api_signature|request_signature|'
     r'callback_token|hook_secret|hook_token)\b'
 )
+_TIMING_WEBHOOK_VARS = re.compile(r'(?i)' + _TIMING_WEBHOOK_VARS_RAW)
 _TIMING_REQUEST_TAINT = re.compile(
     r'(?i)(req\.(body|headers|query|params)|request\.(args|headers|form|json|values))'
 )
@@ -671,8 +672,8 @@ def check_timing_comparison(lines: list[str], language: str) -> list[RuleMatch]:
             # Check if the webhook var is directly adjacent to a string literal comparison
             # Pattern: webhook_var === 'literal' or 'literal' === webhook_var
             webhook_vs_literal = re.search(
-                r'(?:' + _TIMING_WEBHOOK_VARS.pattern + r')\s*(?:===|!==|==|!=)\s*["\']'
-                r'|["\']s*(?:===|!==|==|!=)\s*(?:' + _TIMING_WEBHOOK_VARS.pattern + r')',
+                r'(?:' + _TIMING_WEBHOOK_VARS_RAW + r')\s*(?:===|!==|==|!=)\s*["\']'
+                r'|["\'\s]*(?:===|!==|==|!=)\s*(?:' + _TIMING_WEBHOOK_VARS_RAW + r')',
                 line, re.IGNORECASE
             )
             # If webhook var is directly compared to a string literal (and no request taint on line),
