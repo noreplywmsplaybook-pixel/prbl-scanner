@@ -127,7 +127,7 @@ pip install prbl-scanner
 
 prbl-scanner scan ./myproject
 
-> **Note:** Scanning this repo's own source (`prbl/scanner/rules.py`) will produce findings. Those are expected — the file contains regex pattern definitions that include real credential strings, weak-randomness examples, and injection snippets as detection targets. They are pattern literals, not live vulnerabilities. Exclude the scanner's own source when scanning: `prbl-scanner scan . --exclude prbl/`
+> **Note:** If you run `prbl-scanner scan .` inside this repo, you'll see ~17 findings on `prbl/scanner/rules.py` itself. Those are expected — the file contains regex pattern definitions that embed real credential strings, weak-randomness examples, and injection snippets as detection targets. They are pattern literals, not live vulnerabilities. Scan a target project directory rather than this repo's own root to avoid this.
 
 ## JSON output
 
