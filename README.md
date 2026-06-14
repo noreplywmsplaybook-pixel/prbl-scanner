@@ -28,6 +28,14 @@ how LLMs were trained, not because of developer mistakes.
   String equality short-circuits on the first differing byte, allowing
   timing attacks that reconstruct the expected value one byte at a time.
 
+- **PRBL-R003** — AES-GCM decipher missing authentication tag length enforcement  
+  `CWE-345 · OWASP A02 · #2 most critical web security risk`  
+  Detects `crypto.createDecipheriv()` with AES-GCM mode (`aes-128-gcm`, `aes-192-gcm`,
+  `aes-256-gcm`) where `setAuthTagLength()` is not called in the following 20 lines.
+  Without explicit tag length enforcement, an attacker can supply a truncated
+  authentication tag (e.g. 4 bytes instead of 16), weakening GCM integrity verification
+  and enabling authentication bypass. JavaScript/TypeScript only.
+
 - **PRBL-I001** — SQL injection including multi-line patterns  
   `CWE-89 · OWASP A05 · #5 most critical web security risk`  
   Detects user input concatenated or interpolated into SQL queries,

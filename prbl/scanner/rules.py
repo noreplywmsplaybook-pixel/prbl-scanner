@@ -49,6 +49,7 @@ _OWASP: dict[str, tuple[str, str, int]] = {
     "PRBL-R002": ("CWE-208",    "A02 — Cryptographic Failures",  2),
     "PRBL-A002": ("CWE-347",    "A07 — Authentication Failures", 7),
     "PRBL-C003": ("CWE-295",    "A02 — Cryptographic Failures",  2),
+    "PRBL-R003": ("CWE-345",    "A02 — Cryptographic Failures",  2),
 }
 
 
@@ -699,6 +700,65 @@ def check_timing_comparison(lines: list[str], language: str) -> list[RuleMatch]:
                 severity="high",
             ))
 
+    return findings
+
+
+# ── 2c. AES-GCM DECIPHER WITHOUT AUTH TAG LENGTH (PRBL-R003) ─────────────────
+
+_AES_GCM_DECIPHER = re.compile(
+    r'createDecipheriv\s*\(\s*[\'"]aes-(?:128|192|256)-gcm[\'"]',
+    re.IGNORECASE,
+)
+_AES_GCM_AUTH_TAG_LENGTH = re.compile(r'setAuthTagLength\s*\(', re.IGNORECASE)
+
+
+def check_aes_gcm_auth_tag(lines: list[str], language: str, file_path: str = '') -> list[RuleMatch]:
+    """
+    PRBL-R003: createDecipheriv() with AES-GCM mode where setAuthTagLength()
+    is not called within the following 20 lines.
+    """
+    if language not in ('javascript', 'typescript'):
+        return []
+    if _is_test_file(file_path):
+        return []
+    code = '\n'.join(lines)
+    if _is_minified_file(file_path, code):
+        return []
+
+    findings = []
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        # Skip comment lines
+        if stripped.startswith(('//', '*', '/*')):
+            continue
+        if not _AES_GCM_DECIPHER.search(line):
+            continue
+        # Collect 20-line lookahead window (lines after the trigger line)
+        lookahead_end = min(len(lines), i + 20)
+        lookahead = '\n'.join(lines[i:lookahead_end])
+        if _AES_GCM_AUTH_TAG_LENGTH.search(lookahead):
+            continue  # setAuthTagLength present in window — correctly configured
+        findings.append(_match(
+            rule_id="PRBL-R003",
+            vuln_class="crypto_misconfiguration",
+            line_number=i,
+            line=stripped,
+            title="AES-GCM decipher created without authentication tag length verification",
+            detail=(
+                "crypto.createDecipheriv() is called with an AES-GCM mode but "
+                "setAuthTagLength() is not called on the resulting decipher object. "
+                "Without explicit tag length enforcement, an attacker can supply a "
+                "truncated authentication tag — for example 4 bytes instead of 16 — "
+                "and Node.js will verify only those bytes, dramatically weakening "
+                "GCM's integrity guarantee and enabling authentication bypass."
+            ),
+            fix=(
+                "Call `decipher.setAuthTagLength(16)` immediately after `createDecipheriv()`. "
+                "This enforces that the authentication tag must be exactly 16 bytes, "
+                "preventing truncated-tag authentication bypass."
+            ),
+            severity="high",
+        ))
     return findings
 
 
@@ -2131,6 +2191,7 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
         weak_rand = [f for f in weak_rand if f.rule_id != "PRBL-R001"]
     findings += weak_rand
     findings += check_timing_comparison(lines, language)
+    findings += check_aes_gcm_auth_tag(lines, language, file_path=file_path)
     findings += check_jwt_no_verify(lines, language, file_path=file_path)
     findings += check_tls_disabled(lines, language, file_path=file_path)
     injection_findings = check_injection(lines, language)

@@ -265,6 +265,63 @@ if request.headers.get('X-Signature') == webhook_secret:
 
 ---
 
+### PRBL-R003 — AES-GCM Decipher Without Authentication Tag Length Verification
+
+**CWE-345 · OWASP A02 — Cryptographic Failures**
+
+Detects `crypto.createDecipheriv()` called with an AES-GCM mode (`aes-128-gcm`, `aes-192-gcm`, `aes-256-gcm`) where `setAuthTagLength()` is **not** called anywhere in the following 20 lines.
+
+**Language:** JavaScript/TypeScript only (Node.js `crypto` module).
+
+#### What can go wrong
+
+GCM (Galois/Counter Mode) is an authenticated encryption mode — it provides both confidentiality (encryption) and integrity (authentication tag). The authentication tag is what prevents an attacker from tampering with ciphertext without detection.
+
+Without explicit `setAuthTagLength()`, an attacker can supply a **truncated authentication tag** — for example, 4 bytes instead of 16. Because Node.js infers the expected tag length from the tag passed to `setAuthTag()`, it will verify only those 4 bytes if `setAuthTagLength` is not set first. This dramatically weakens the authentication guarantee: a 4-byte tag provides only 1-in-2³² protection instead of 1-in-2¹²⁸.
+
+#### Patterns detected
+
+```javascript
+// PRBL-R003: createDecipheriv with GCM mode, no setAuthTagLength in next 20 lines
+const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+decipher.setAuthTag(authTag);  // passes tag bytes — but doesn't enforce length
+const decrypted = decipher.update(ciphertext, 'hex', 'utf8') + decipher.final('utf8');
+```
+
+**Safe (not flagged):**
+
+```javascript
+// setAuthTagLength called — explicitly enforces 16-byte (128-bit) tag
+const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+decipher.setAuthTagLength(16);  // CORRECT — prevents truncated-tag bypass
+decipher.setAuthTag(authTag);
+const decrypted = decipher.update(ciphertext, 'hex', 'utf8') + decipher.final('utf8');
+```
+
+#### Detection logic
+
+1. Match lines containing `createDecipheriv(` where the first argument matches `aes-(128|192|256)-gcm` (case-insensitive).
+2. Collect a 20-line lookahead window from that line.
+3. If `setAuthTagLength(` does **not** appear in the window → fire R003.
+4. If `setAuthTagLength(` **does** appear → no finding (correctly configured).
+
+**Note:** `createCipheriv` (the encryption side) does **not** need `setAuthTagLength` — the default 16-byte tag is generated correctly. Only the decryption side needs explicit tag length verification.
+
+**Note:** `setAuthTag()` (without "Length") passes the actual tag bytes and is **not** the same as `setAuthTagLength()`. The presence of `setAuthTag()` alone does not suppress this finding.
+
+**Severity:** HIGH.
+
+#### Known Limitations
+
+**Covered:** All three AES-GCM key sizes (128, 192, 256-bit). JavaScript and TypeScript source files. 20-line lookahead window.
+
+**Not covered:**
+- Cross-function calls: if `setAuthTagLength` is called in a helper function called from a different scope, the scanner will not trace the call graph and may fire. (Acceptable tradeoff — regex-based model.)
+- Other GCM implementations (WebCrypto `SubtleCrypto.decrypt` with `AES-GCM`) — the SubtleCrypto API always requires the tag length in the algorithm descriptor, so truncation attacks are not possible via that API. (OUT OF SCOPE — different API, different risk profile.)
+- Go's `crypto/cipher` GCM — Go is out of scope. (OUT OF SCOPE.)
+
+---
+
 ### PRBL-I001 — SQL Injection
 
 **CWE-89 · OWASP A05 — Injection**
@@ -824,7 +881,7 @@ Categories and rankings follow the **OWASP Top 10 2021** revision (the current s
 |---|---|
 | PRBL-C001, PRBL-C002, PRBL-A002 | A07 — Identification and Authentication Failures |
 | PRBL-R001 | A04 — Insecure Design (Cryptographic Failures) |
-| PRBL-R002, PRBL-C003 | A02 — Cryptographic Failures |
+| PRBL-R002, PRBL-R003, PRBL-C003 | A02 — Cryptographic Failures |
 | PRBL-I001, PRBL-I002, PRBL-I003, PRBL-I004 | A05 — Injection |
 | PRBL-A001, PRBL-T001 | A01 — Broken Access Control |
 
