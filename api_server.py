@@ -24,8 +24,7 @@ from fastapi import Request, Header
 
 _START_TIME = _time.time()
 
-STATS_FILE = Path("/var/lib/prbl/stats.json")
-STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+STATS_FILE = Path(__file__).parent / "stats.json"
 
 
 def _load_stats() -> dict:
