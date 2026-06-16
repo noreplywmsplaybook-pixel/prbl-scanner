@@ -3,11 +3,13 @@ Prbl scan API — FastAPI service on port 8000.
 Accepts a public GitHub repo URL, clones it, runs PrblScanner, returns findings.
 """
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +21,36 @@ from prbl.scanner import PrblScanner
 import time as _time
 from collections import defaultdict
 from fastapi import Request, Header
+
+_START_TIME = _time.time()
+
+STATS_FILE = Path("/var/lib/prbl/stats.json")
+STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _load_stats() -> dict:
+    try:
+        if STATS_FILE.exists():
+            return json.loads(STATS_FILE.read_text())
+    except Exception:
+        pass
+    return {"total_scans": 0, "recent": []}
+
+
+def _record_scan(repo: str, findings: int, files: int) -> None:
+    stats = _load_stats()
+    stats["total_scans"] = stats.get("total_scans", 0) + 1
+    entry = {
+        "repo": repo,
+        "findings": findings,
+        "files": files,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    stats["recent"] = ([entry] + stats.get("recent", []))[:50]
+    try:
+        STATS_FILE.write_text(json.dumps(stats))
+    except Exception:
+        pass
 
 app = FastAPI(title="Prbl Scanner API")
 
@@ -98,8 +130,22 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/admin/stats")
+def admin_stats(x_admin_token: str = Header(default="")):
+    if not ADMIN_TOKEN or x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    stats = _load_stats()
+    return {
+        "status": "ok",
+        "total_scans": stats.get("total_scans", 0),
+        "recent_scans": stats.get("recent", [])[:20],
+        "uptime_seconds": int(_time.time() - _START_TIME),
+    }
+
+
 # ── Auth + abuse protection ──────────────────────────────────────────────────
 SCAN_TOKEN = os.environ.get("SCAN_TOKEN", "")
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
 # Per-client-IP rate limit for the public landing-page scanner.
 # The landing route forwards the visitor IP in X-Client-IP; dashboard routes
@@ -228,6 +274,8 @@ def scan_repo(
         high = sum(1 for f in findings if f.severity == "high")
         medium = sum(1 for f in findings if f.severity == "medium")
         low = sum(1 for f in findings if f.severity == "low")
+
+        _record_scan(repo_name, len(findings), files_scanned)
 
         return ScanResponse(
             repo=repo_name,
