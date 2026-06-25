@@ -408,3 +408,64 @@ export async function GET(request) {
     findings = run(code, language='javascript', file_path='app/api/health/route.ts')
     a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
     assert not a001, f"A001 must not fire on app/api/health/route.ts. Got: {a001}"
+
+
+# ── Centralized/router-level auth blind spot ────────────────────────────────
+# Confirmed across 8 frameworks in a 976-repo HN stress test (Express, Next.js,
+# FastAPI, Fastify, SvelteKit, NestJS, Flask, Hono). When auth is applied once
+# at the router/middleware level instead of per-route, a per-route pattern
+# match can never see it — repos hit this at scale (7-34 near-identical A001
+# hits in one file). Downgraded to LOW with a "verify manually" message rather
+# than suppressed entirely, since centralized auth can still have real gaps.
+
+def test_fastapi_router_dependencies_downgraded_to_low():
+    """FastAPI APIRouter(dependencies=[...]) — auth applied at router level."""
+    padding = "\n".join(f"# padding line {i}" for i in range(70))
+    code = f"""
+from fastapi import APIRouter, Depends
+router = APIRouter(dependencies=[Depends(get_current_user)])
+{padding}
+
+@router.get("/users", response_model=list)
+def list_users():
+    return db.query(User).all()
+"""
+    findings = run(code, language='python', file_path='routes.py')
+    a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
+    assert a001, "A001 should still fire (downgraded), not disappear entirely"
+    assert a001[0]['severity'] == 'low', \
+        f"A001 must downgrade to LOW when APIRouter(dependencies=[...]) is present. Got: {a001}"
+
+
+def test_express_router_use_downgraded_to_low():
+    """Express router.use(middleware) — auth applied at router level."""
+    padding = "\n".join(f"// padding line {i}" for i in range(70))
+    code = f"""
+const router = require('express').Router();
+router.use(globalMiddleware);
+{padding}
+
+router.get('/users', (req, res) => {{
+  db.query('SELECT * FROM users').then(rows => res.json(rows));
+}});
+"""
+    findings = run(code, language='javascript', file_path='routes.js')
+    a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
+    assert a001, "A001 should still fire (downgraded), not disappear entirely"
+    assert a001[0]['severity'] == 'low', \
+        f"A001 must downgrade to LOW when router.use(...) is present. Got: {a001}"
+
+
+def test_plain_unauthenticated_route_still_fires_medium():
+    """Regression guard: no router-level auth signal anywhere — must still
+    fire MEDIUM, not get incorrectly downgraded."""
+    code = """
+app.get('/users', (req, res) => {
+  db.query('SELECT * FROM users').then(rows => res.json(rows));
+});
+"""
+    findings = run(code, language='javascript', file_path='plain.js')
+    a001 = [f for f in findings if f['rule_id'] == 'PRBL-A001']
+    assert a001, "A001 must still fire on a genuinely unauthenticated route"
+    assert a001[0]['severity'] == 'medium', \
+        f"A001 must stay MEDIUM with no router-level auth signal present. Got: {a001}"

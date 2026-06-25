@@ -200,3 +200,47 @@ def test_fp_idx_key_name():
         "}\n"
     )
     assert not _findings(code), "Must NOT fire on 'idx' key variable"
+
+
+# ── FP regressions: array destructuring confused with bracket assignment ────
+# `const [x] = await asyncCall()` matches the same `\w[\w.]*\[\w[\w.]*\]\s*=`
+# shape as `obj[key] = value` — group(1) captures "const" (a declaration
+# keyword, not a real object) and group(2) captures the destructured variable
+# name, not a property key. Found in production in niledatabase/nile-auth's
+# own authentication code during a 976-repo HN stress test — at its worst
+# this single bug accounted for the majority of I005 findings in a batch.
+
+def test_fp_destructuring_const_session():
+    """Array destructuring of an async auth call — not bracket assignment."""
+    code = "const [session] = await auth(req)"
+    assert not _findings(code, language="typescript", file_path="auth.ts"), \
+        "Must NOT fire on array destructuring `const [session] = await auth(req)`"
+
+
+def test_fp_destructuring_const_csrf_token():
+    """Array destructuring of an async CSRF check — not bracket assignment."""
+    code = "const [hasValidToken] = await validCsrfToken(req)"
+    assert not _findings(code, language="typescript", file_path="auth.ts"), \
+        "Must NOT fire on array destructuring `const [hasValidToken] = await validCsrfToken()`"
+
+
+def test_fp_destructuring_let_and_var():
+    """`let` and `var` destructuring must be suppressed the same as `const`."""
+    code1 = "let [first] = await getRows(req)"
+    code2 = "var [row] = await db.select().from(users)"
+    assert not _findings(code1, language="typescript", file_path="db.ts")
+    assert not _findings(code2, language="typescript", file_path="db.ts")
+
+
+def test_tp_real_bracket_assignment_with_tainted_key_still_fires():
+    """Regression guard: the destructuring fix must not weaken real bracket
+    assignment detection — a tainted key in a request-handler context must
+    still fire."""
+    code = (
+        "function handler(req, res) {\n"
+        "  const userKey = req.params.key\n"
+        "  obj[userKey] = value\n"
+        "}\n"
+    )
+    assert _findings(code, language="typescript", file_path="handler.ts"), \
+        "Must still fire PRBL-I005 on real obj[key] = value with a tainted key"

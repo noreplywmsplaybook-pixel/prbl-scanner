@@ -1539,6 +1539,41 @@ _A001_PUBLIC_FILE_PATH = re.compile(
     r'(?i)/api/(?:health|ping|status|ready|live|liveness|healthz|readyz)/',
 )
 
+# Centralized/router-level auth — confirmed across 8 frameworks in a 976-repo
+# HN stress test (Express, Next.js, FastAPI, Fastify, SvelteKit, NestJS, Flask,
+# Hono). When auth is applied once at the router/middleware level rather than
+# per-route, a per-route pattern match can never see it — repos hit this at
+# scale (7-34 near-identical A001 hits in a single file when this is present).
+# Not suppressed entirely (centralized auth can still have real gaps), just
+# downgraded from a definitive MEDIUM finding to a LOW "verify manually" one.
+_ROUTER_LEVEL_AUTH_SIGNALS = re.compile(
+    r'(?:APIRouter\s*\(\s*dependencies\s*=\s*\[|'
+    r'router\.use\s*\(|'
+    r'app\.use\s*\(|'
+    r'createRouter\s*\(|'
+    r'Router\s*\(\s*\{\s*middleware\s*:|'
+    r'@?useGuards\s*\(|'
+    r"fastify\.addHook\s*\(\s*['\"]preHandler['\"]|"
+    r'app\.setGlobalPrefix|'
+    r'DEFAULT_PERMISSION_CLASSES)',
+    re.IGNORECASE,
+)
+
+
+def _has_router_level_auth_signal(lines: list[str]) -> bool:
+    """True if the file shows signs of centralized/router-level auth — checked
+    in the first 50 lines (where middleware registration conventionally
+    happens) or in any import/require statement anywhere in the file."""
+    first_50 = '\n'.join(lines[:50])
+    if _ROUTER_LEVEL_AUTH_SIGNALS.search(first_50):
+        return True
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(('import ', 'from ')) or 'require(' in stripped:
+            if _ROUTER_LEVEL_AUTH_SIGNALS.search(stripped):
+                return True
+    return False
+
 
 def _has_django_settings(file_path: str) -> bool:
     """
@@ -1596,6 +1631,7 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
             return findings
 
     full_text = '\n'.join(lines)
+    router_level_auth = _has_router_level_auth_signal(lines)
 
     # --- Serverless file-level handler check ---
     if language in ("javascript", "typescript"):
@@ -1618,19 +1654,25 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
                     return findings  # inline auth found — not a real finding
 
                 handler_line_str = lines[handler_line - 1].strip()
+                if router_level_auth:
+                    sev = "low"
+                    detail = "Auth may be applied at the router or middleware level — verify manually."
+                else:
+                    sev = "medium"
+                    detail = (
+                        "This serverless function performs a sensitive operation (database access, "
+                        "user data, or financial action) with no visible authentication check on "
+                        "the incoming request. Any unauthenticated caller can invoke it."
+                    )
                 findings.append(_match(
                     rule_id="PRBL-A001",
                     vuln_class="missing_access_control",
                     line_number=handler_line,
                     line=handler_line_str,
                     title="Missing access control on serverless handler with sensitive operation",
-                    detail=(
-                        "This serverless function performs a sensitive operation (database access, "
-                        "user data, or financial action) with no visible authentication check on "
-                        "the incoming request. Any unauthenticated caller can invoke it."
-                    ),
+                    detail=detail,
                     fix="Verify the caller's identity before processing the request — check a Bearer token, session cookie, or API key against your auth provider.",
-                    severity="medium",
+                    severity=sev,
                 ))
             return findings  # File is a serverless handler — don't also run Express patterns
 
@@ -1749,6 +1791,14 @@ def check_missing_access_control(lines: list[str], language: str, file_path: str
                     "includes IsAuthenticated. For endpoints that must be public (e.g. registration, "
                     "login), add permission_classes = [AllowAny] explicitly so the intent is clear."
                 )
+            elif router_level_auth:
+                # Centralized auth signal found (router-level dependencies, app/router
+                # .use() middleware, guards, etc.) — don't treat this as a definitive
+                # missing-auth finding, but don't suppress it either since centralized
+                # auth can still have gaps.
+                sev = "low"
+                detail = "Auth may be applied at the router or middleware level — verify manually."
+                fix = "Confirm the router/middleware auth actually covers this route. If not, add an explicit per-route check."
             elif is_public_by_name or has_rate_limit:
                 sev = "low"
                 detail = (
@@ -2031,6 +2081,15 @@ _MAP_SET_NEW = re.compile(r'new\s+(Map|Set)\s*\(')
 # for...of / for...in iterating array or object → skip bracket assignment inside
 _FOR_LOOP = re.compile(r'\bfor\s*\(')
 
+# Array destructuring: const [x] = await asyncCall() / let [a] = arr / var [b] = ...
+# _BRACKET_ASSIGN's group(1) captures the word immediately before "[" — for
+# destructuring that word is a declaration keyword, not a real object, and
+# group(2) captures the destructured variable NAME, not a property key.
+# `const [session] = await auth(req)` is array destructuring of an async
+# call's return value; it has nothing to do with obj[key] = value bracket
+# assignment and cannot cause prototype pollution.
+_DESTRUCTURING_KEYWORDS = frozenset({'const', 'let', 'var'})
+
 
 def check_prototype_pollution(lines: list[str], language: str, file_path: str = '') -> list[RuleMatch]:
     """
@@ -2059,6 +2118,16 @@ def check_prototype_pollution(lines: list[str], language: str, file_path: str = 
 
         obj_expr = m.group(1)
         key_expr = m.group(2).strip()
+
+        # FP guard #0: array destructuring, not bracket assignment.
+        # `const [session] = await auth(req)` matches the same regex shape as
+        # `obj[key] = value` — group(1) captures "const" (a declaration
+        # keyword, not an object) and group(2) captures the destructured
+        # variable name, not a property key. Confirmed in production code
+        # including niledatabase/nile-auth's own `const [session] = await
+        # auth(req)` and `const [hasValidToken] = await validCsrfToken(...)`.
+        if obj_expr in _DESTRUCTURING_KEYWORDS:
+            continue
 
         # FP guard #1: string literal key
         if key_expr and key_expr[0] in ('"', "'", '`'):
