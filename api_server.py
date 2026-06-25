@@ -9,11 +9,13 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -74,8 +76,29 @@ SKIP_DIRS = {
     "venv", ".venv", "vendor", "coverage", ".pytest_cache",
 }
 MAX_FILE_SIZE = 200_000  # 200 KB per file
-MAX_FILES = 300
+# Async scanning removes the old 60s Vercel-timeout constraint, so this can be
+# generous — the real limit is VPS CPU/memory, guarded by MAX_CONCURRENT_SCANS.
+MAX_FILES = 3000
 MAX_REPO_SIZE_MB = 100
+
+# ── Async job store ──────────────────────────────────────────────────────────
+# Scans run in a background thread; the dashboard polls /scan/status/{job_id}
+# instead of holding one HTTP request open for the whole clone+scan duration.
+JOBS: dict[str, dict] = {}
+JOBS_LOCK = threading.Lock()
+JOB_TTL_SECONDS = 3600  # stale job entries are swept on each /scan/start call
+
+MAX_CONCURRENT_SCANS = 2  # matches the VPS's 2 vCPUs
+_active_scans = 0
+_active_scans_lock = threading.Lock()
+
+
+def _sweep_old_jobs() -> None:
+    cutoff = _time.time() - JOB_TTL_SECONDS
+    with JOBS_LOCK:
+        stale = [jid for jid, j in JOBS.items() if j.get("created_at", 0) < cutoff]
+        for jid in stale:
+            del JOBS[jid]
 
 
 class ScanRequest(BaseModel):
@@ -154,31 +177,9 @@ IP_WINDOW = 3600      # per hour
 _ip_hits: dict[str, list[float]] = defaultdict(list)
 
 
-@app.post("/scan", response_model=ScanResponse)
-def scan_repo(
-    req: ScanRequest,
-    request: Request,
-    x_scan_token: str = Header(default=""),
-    x_client_ip: str = Header(default=""),
-):
-    if not SCAN_TOKEN:
-        raise HTTPException(status_code=503, detail="Scanner not configured")
-    if x_scan_token != SCAN_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    # Use real socket IP for rate limiting; only trust X-Client-IP when the
-    # request already passed token auth (i.e. comes from our dashboard proxy).
-    real_ip = (request.client.host if request.client else None) or x_client_ip
-    if real_ip:
-        now = _time.time()
-        hits = [t for t in _ip_hits[real_ip] if now - t < IP_WINDOW]
-        if len(hits) >= IP_LIMIT:
-            raise HTTPException(
-                status_code=429,
-                detail="Rate limit reached — 5 free scans per hour. Sign up for more.",
-            )
-        hits.append(now)
-        _ip_hits[real_ip] = hits
+def _run_scan(req: ScanRequest) -> ScanResponse:
+    """Clone + scan. Raises HTTPException on failure. Shared by the sync
+    /scan endpoint and the async /scan/start background job."""
     url = validate_github_url(req.repo_url)
     repo_name = "/".join(url.split("/")[-2:])
 
@@ -299,3 +300,108 @@ def scan_repo(
         raise HTTPException(status_code=500, detail=f"Scan failed: {msg}")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _check_auth_and_rate_limit(req: ScanRequest, request: Request, x_scan_token: str, x_client_ip: str) -> None:
+    if not SCAN_TOKEN:
+        raise HTTPException(status_code=503, detail="Scanner not configured")
+    if x_scan_token != SCAN_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Use real socket IP for rate limiting; only trust X-Client-IP when the
+    # request already passed token auth (i.e. comes from our dashboard proxy).
+    real_ip = (request.client.host if request.client else None) or x_client_ip
+    if real_ip:
+        now = _time.time()
+        hits = [t for t in _ip_hits[real_ip] if now - t < IP_WINDOW]
+        if len(hits) >= IP_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit reached — 5 free scans per hour. Sign up for more.",
+            )
+        hits.append(now)
+        _ip_hits[real_ip] = hits
+
+
+@app.post("/scan", response_model=ScanResponse)
+def scan_repo(
+    req: ScanRequest,
+    request: Request,
+    x_scan_token: str = Header(default=""),
+    x_client_ip: str = Header(default=""),
+):
+    """Synchronous scan — kept for the public landing-page scanner, which only
+    handles smaller public repos and fits comfortably inside one request."""
+    _check_auth_and_rate_limit(req, request, x_scan_token, x_client_ip)
+    return _run_scan(req)
+
+
+def _do_scan_job(job_id: str, req: ScanRequest) -> None:
+    global _active_scans
+    with _active_scans_lock:
+        _active_scans += 1
+    try:
+        result = _run_scan(req)
+        with JOBS_LOCK:
+            JOBS[job_id]["status"] = "done"
+            JOBS[job_id]["result"] = result.model_dump()
+    except HTTPException as e:
+        with JOBS_LOCK:
+            JOBS[job_id]["status"] = "error"
+            JOBS[job_id]["error"] = e.detail
+            JOBS[job_id]["status_code"] = e.status_code
+    except Exception as e:
+        with JOBS_LOCK:
+            JOBS[job_id]["status"] = "error"
+            JOBS[job_id]["error"] = f"Scan failed: {e}"
+            JOBS[job_id]["status_code"] = 500
+    finally:
+        with _active_scans_lock:
+            _active_scans -= 1
+
+
+@app.post("/scan/start")
+def scan_start(
+    req: ScanRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_scan_token: str = Header(default=""),
+    x_client_ip: str = Header(default=""),
+):
+    """Kicks off a scan in the background and returns immediately with a
+    job_id. Callers poll /scan/status/{job_id} for the result. This removes
+    the dependency on the caller's own HTTP timeout (e.g. Vercel's
+    maxDuration) for large repos that take longer than a minute to scan."""
+    _check_auth_and_rate_limit(req, request, x_scan_token, x_client_ip)
+
+    _sweep_old_jobs()
+
+    with _active_scans_lock:
+        if _active_scans >= MAX_CONCURRENT_SCANS:
+            raise HTTPException(
+                status_code=503,
+                detail="Scanner is at capacity — please try again in a minute.",
+            )
+
+    job_id = uuid.uuid4().hex
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "status": "running",
+            "result": None,
+            "error": None,
+            "created_at": _time.time(),
+        }
+
+    background_tasks.add_task(_do_scan_job, job_id, req)
+    return {"job_id": job_id, "status": "started"}
+
+
+@app.get("/scan/status/{job_id}")
+def scan_status(job_id: str, x_scan_token: str = Header(default="")):
+    if not SCAN_TOKEN or x_scan_token != SCAN_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    return job
