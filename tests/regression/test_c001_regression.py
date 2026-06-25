@@ -459,3 +459,63 @@ def test_real_cred_assignment_still_fires():
     findings = run(code, language='javascript', file_path='app.js')
     assert any(f['rule_id'] == 'PRBL-C001' for f in findings), \
         "C001 must still fire when credential is assigned, not asserted-absent"
+
+
+# ── FIX: DOCUMENTATION/MARKETING EXAMPLE FORMAT SUPPRESSION ───────────────────
+
+def test_doc_example_format_suppressed():
+    """True negative: "create_blog_posts.py:22 — password='password123'" is marketing
+    copy describing a finding example, not a real assignment in this .tsx file."""
+    code = 'code: "create_blog_posts.py:22 — password=\'password123\'",'
+    findings = run(code, language='typescript', file_path='app/page.tsx')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"C001 must not fire on 'file:line — description' doc format. Got: {c001}"
+
+
+def test_doc_example_format_fallback_secret_suppressed():
+    """True negative: same doc-format guard applies to the fallback-secret example string."""
+    code = 'code: "jwt.js:3 — process.env.JWT_SECRET || \'default_secret\'",'
+    findings = run(code, language='typescript', file_path='app/page.tsx')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"C001 must not fire on 'file:line — description' doc format. Got: {c001}"
+
+
+def test_real_cred_not_suppressed_by_doc_example_guard():
+    """True positive: a real assignment without the 'file:line —' prefix must still fire,
+    even on a similar-looking line, so the doc-format guard doesn't overreach."""
+    code = 'const password = "password123"'
+    findings = run(code, language='javascript', file_path='app/page.tsx')
+    assert any(f['rule_id'] == 'PRBL-C001' for f in findings), \
+        "C001 must still fire on a real assignment without the doc-format prefix"
+
+
+# ── Fix 1: UI label suppression (HN stress-test FP) ──────────────────────────
+
+def test_verify_password_label_not_flagged():
+    """Regression: an i18n/UI label whose key contains 'password' but whose
+    value is a plain-English phrase ('Verify password') is not a credential.
+    Found in Snouzy/workout-cool's locales/en.ts during the HN stress test."""
+    code = 'verify_password: "Verify password",'
+    findings = run(code, language='typescript', file_path='locales/en.ts')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"C001 must not fire on a plain-English UI label. Got: {c001}"
+
+
+def test_ui_label_key_hint_single_word_not_flagged():
+    """Regression: a single-word plain-English value is only suppressed when
+    the key itself signals UI copy (label/text/title/button/message/etc.) —
+    this must not weaken detection of real single-word secrets."""
+    code = 'confirmButtonText: "Confirm",'
+    findings = run(code, language='typescript', file_path='locales/en.ts')
+    c001 = [f for f in findings if f['rule_id'] == 'PRBL-C001']
+    assert not c001, f"C001 must not fire on a UI button label. Got: {c001}"
+
+
+def test_single_word_secret_without_label_key_still_fires():
+    """Regression guard: a single-word, non-placeholder secret value with no
+    UI-label key hint must still fire — the UI-label suppression must not
+    over-suppress real secrets that happen to be a single clean-cased word."""
+    code = 'password = "myDragonflyVault"'
+    findings = run(code, language='python', file_path='auth.py')
+    assert any(f['rule_id'] == 'PRBL-C001' for f in findings), \
+        "C001 must still fire on a real single-word secret with no UI-label key"

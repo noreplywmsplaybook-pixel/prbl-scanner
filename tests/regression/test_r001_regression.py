@@ -201,3 +201,62 @@ res.cookie('session', token)
     r001 = [f for f in findings if f['rule_id'] == 'PRBL-R001']
     assert not r001, \
         f"PRBL-R001 must not fire on uuid.v4() — it is cryptographically secure. Got: {r001}"
+
+
+# ── Fix 3: security-context gate rewrite (HN stress-test FPs) ───────────────
+
+def test_random_for_otp_fires():
+    """True positive: Math.random() used to generate a numeric OTP/verification
+    code must fire HIGH. Found in sourcebot-dev/sourcebot's auth.ts during the
+    HN stress test — a textbook weak-randomness-for-auth finding."""
+    code = "const otpCode = String(Math.floor(100000 + Math.random() * 900000));"
+    findings = run(code, file_path='auth.ts')
+    r001 = [f for f in findings if f['rule_id'] == 'PRBL-R001']
+    assert r001, "PRBL-R001 must fire when Math.random() generates an OTP"
+    assert r001[0]['severity'] == 'high'
+
+
+def test_random_for_ui_icon_index_not_flagged():
+    """Regression: Math.random() used to pick a random icon/index for cosmetic
+    UI arrangement must not fire. Found in trycua/cua's desktop.py during the
+    HN stress test — picking random icons to arrange on a simulated desktop
+    has no security implication. The old window-based context check matched
+    'pin' as a substring inside 'pin_count'/'pinned_apps_names', which had
+    nothing to do with PIN codes; gating on the assignment target instead of
+    a loose window fixes this."""
+    code = "pin_count = random.randint(1, min(5, len(application_icons)))"
+    findings = run(code, language='python', file_path='desktop.py')
+    r001 = [f for f in findings if f['rule_id'] == 'PRBL-R001']
+    assert not r001, f"PRBL-R001 must not fire on cosmetic icon-index randomness. Got: {r001}"
+
+
+def test_random_for_seed_script_duration_not_flagged():
+    """Regression: Math.random() used in a demo-data seed script to generate a
+    workout duration must not fire. Found in Snouzy/workout-cool's
+    seed-workout-data-advanced.ts during the HN stress test — the old
+    window-based check matched 'session' as a substring inside
+    'sessionDuration' (a workout session length, not an auth session)."""
+    code = "const sessionDuration = 30 + Math.floor(Math.random() * 60);"
+    findings = run(code, file_path='scripts/seed-workout-data-advanced.ts')
+    r001 = [f for f in findings if f['rule_id'] == 'PRBL-R001']
+    assert not r001, f"PRBL-R001 must not fire on a non-security seed-script duration. Got: {r001}"
+
+
+def test_component_key_still_not_flagged_under_new_gate():
+    """Regression guard: the rewritten gate must not reintroduce the
+    componentKey/refreshKey false positive the useState exclusion already
+    fixed — 'key' alone is too overloaded (React/array/map keys) to fire on
+    bare presence, same as the pre-existing useState path."""
+    code = "const itemKey = Math.random().toString(36).slice(2);"
+    findings = run(code, file_path='list.tsx')
+    r001 = [f for f in findings if f['rule_id'] == 'PRBL-R001']
+    assert not r001, f"PRBL-R001 must not fire on a bare '...Key' UI identifier. Got: {r001}"
+
+
+def test_api_key_still_fires_under_new_gate():
+    """Regression guard: 'key' is only suppressed when bare — a qualified form
+    like apiKey must still fire, since that IS security-sensitive."""
+    code = "const apiKey = Math.random().toString(36);"
+    findings = run(code, file_path='config.ts')
+    r001 = [f for f in findings if f['rule_id'] == 'PRBL-R001']
+    assert r001, "PRBL-R001 must still fire on apiKey generated with Math.random()"

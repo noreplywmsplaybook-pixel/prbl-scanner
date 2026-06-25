@@ -228,3 +228,96 @@ function run(command) {
     i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
     assert not i003, \
         f"PRBL-I003 must not fire on files inside /compiled/ path. Got: {i003}"
+
+
+# ── Fix 2: HN stress-test false positives ────────────────────────────────────
+
+def test_playwright_dollar_dollar_eval_not_flagged():
+    """Regression 2a: Playwright's page.$$eval() is a DOM query API method,
+    unrelated to JS eval(). Found in parsaghaffari/browserbee during the HN
+    stress test — the bare-eval pattern matched "eval(" inside "$$eval(" since
+    '$' is a non-word character and satisfies the original word boundary."""
+    code = '''
+function run(req) {
+    const matches = req.activePage.$$eval(req.body.selector, els => els.length)
+}
+'''
+    findings = run(code, language='javascript', file_path='observationTools.ts')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert not i003, f"PRBL-I003 must not fire on Playwright's $$eval(). Got: {i003}"
+
+
+def test_playwright_single_dollar_eval_not_flagged():
+    """Regression 2a: page.$eval() (single-element variant) is the same Playwright
+    DOM query API as $$eval() and must not fire either."""
+    code = '''
+function run(req) {
+    const el = req.activePage.$eval(req.body.selector, e => e.textContent)
+}
+'''
+    findings = run(code, language='javascript', file_path='observationTools.ts')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert not i003, f"PRBL-I003 must not fire on Playwright's $eval(). Got: {i003}"
+
+
+def test_python_def_exec_shadow_not_flagged():
+    """Regression 2b: a Python function literally named `exec` (shadowing the
+    builtin) that recursively calls itself is not code injection. Found in
+    Ligo-Biosciences/AlphaFold3's checkpointing.py during the HN stress test:
+    `def exec(b, a): return exec(blocks[s:e], a)` — pure recursion on a
+    user-defined function, not the eval/exec builtin. The shell-wrapper guard
+    was JS-only (function/const/let/var) and missed Python's `def`."""
+    code = '''
+def exec(b, a):
+    s, e = b
+    return exec(blocks[s:e], a)
+'''
+    findings = run(code, language='python', file_path='checkpointing.py')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert not i003, f"PRBL-I003 must not fire on a Python function shadowing exec/eval. Got: {i003}"
+
+
+def test_python_def_run_cmd_still_fires():
+    """Regression guard: the def-exec/eval shadow guard must be scoped to just
+    the builtin names exec/eval — a function with a descriptive name like
+    run_cmd that genuinely calls subprocess with shell=True must still fire."""
+    code = '''
+import subprocess
+def run_cmd(user_cmd):
+    subprocess.run("ls " + user_cmd, shell=True)
+'''
+    findings = run(code, language='python', file_path='utils.py')
+    assert any(f['rule_id'] == 'PRBL-I002' for f in findings), \
+        "A descriptively-named wrapper function must not get a free pass from the exec/eval shadow guard"
+
+
+def test_importlib_literal_string_arg_not_flagged():
+    """Regression 2c: importlib.import_module() with a hardcoded string literal
+    cannot be attacker-controlled. Found repeatedly in Kanaries/pygwalker's test
+    suite during the HN stress test: importlib.reload(importlib.import_module(
+    "pygwalker.api.reflex")) — a fixed internal module path, not user input."""
+    code = '''
+def reload_api(request):
+    reflex = importlib.reload(importlib.import_module("pygwalker.api.reflex"))
+    return reflex
+'''
+    findings = run(code, language='python', file_path='test_integration_apis.py')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert not i003, \
+        f"PRBL-I003 must not fire on importlib.import_module() with a literal string. Got: {i003}"
+
+
+def test_importlib_variable_arg_still_fires():
+    """Regression guard: importlib.import_module() with a VARIABLE argument is
+    still a legitimate candidate for review — only literal string arguments
+    are suppressed, since a variable might carry tainted input."""
+    code = '''
+def load_plugin(request):
+    module_path = request.get_json()["plugin"]
+    module = importlib.import_module(module_path)
+    return module
+'''
+    findings = run(code, language='python', file_path='plugin_loader.py')
+    i003 = [f for f in findings if f['rule_id'] == 'PRBL-I003']
+    assert i003, \
+        "PRBL-I003 must still fire on importlib.import_module() with a variable argument"

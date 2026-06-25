@@ -149,6 +149,16 @@ _CRED_PLACEHOLDER_VALUES = re.compile(
     re.IGNORECASE,
 )
 
+# Documentation/example finding format — "path/file.ext:LINE — description" is how
+# security blog posts, marketing pages, and changelogs describe a vulnerability
+# example in prose. It's not a real assignment in this file; it's text *about* one
+# elsewhere (often in a different language than the file being scanned, e.g. a
+# Python filename referenced from a .tsx marketing page). Real credential
+# assignments don't carry a "file:line —" prefix.
+_CRED_DOC_EXAMPLE_FORMAT = re.compile(
+    r'[\w./-]+\.\w{1,10}:\d+\s*[—–\-]{1,2}\s',
+)
+
 # Bcrypt hash pattern — already-hashed passwords in seeders/fixtures are not
 # plaintext secrets. A bcrypt hash cannot be reversed to recover the original.
 _BCRYPT_HASH = re.compile(r'^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$')
@@ -174,6 +184,32 @@ def _is_non_ascii(value: str) -> bool:
     """Return True if the value contains any non-ASCII characters (Unicode > 127).
     Non-ASCII values are i18n labels, translated strings, or UI text — never secrets."""
     return any(ord(c) > 127 for c in value)
+
+
+# Fix 1: UI label key-name hints — keys like `verifyPasswordLabel`, `confirmButtonText`,
+# `errorMessage`, `modalTitle` are display strings, not credentials, regardless of
+# the value. Checked against the KEY (left of `:`/`=`), not the value.
+_UI_LABEL_KEY_HINTS = re.compile(
+    r'(?i)\b\w*(?:label|text|title|placeholder|button|message|display|caption)\w*\b'
+)
+
+
+def _looks_like_plain_english_label(value: str) -> bool:
+    """True if `value` reads like UI copy, not a secret: ASCII only, no digits,
+    and no high-entropy mixed-case token. A real secret like 'aB3xZ9Lm' mixes
+    case unpredictably within a single word; English phrases like 'Verify password'
+    do not — each word is either all-lowercase, all-uppercase, or Capitalized."""
+    if not value or _is_non_ascii(value):
+        return False
+    if any(c.isdigit() for c in value):
+        return False
+    for word in value.split():
+        cleaned = ''.join(c for c in word if c.isalpha())
+        if not cleaned:
+            continue
+        if cleaned not in (cleaned.lower(), cleaned.upper(), cleaned.capitalize()):
+            return False  # erratic mixed case — entropy signal, not English text
+    return True
 
 # Known status/configuration indicator words — clearly not secrets.
 # Explicit allowlist rather than a broad regex to avoid suppressing real credential words
@@ -260,6 +296,12 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
         if stripped.startswith(('#', '//', '*', '"""', "'''")):
+            continue
+        # Documentation/marketing example — "jwt.js:3 — process.env.JWT_SECRET || 'x'"
+        # describes a finding in prose, not a real fallback in this file. Must run
+        # before the fallback check below, since that check intentionally bypasses
+        # the later _CRED_SAFE_CONTEXT guard.
+        if _CRED_DOC_EXAMPLE_FORMAT.search(line):
             continue
 
         # ── Fallback secret check ─────────────────────────────────────────────
@@ -376,6 +418,15 @@ def check_hardcoded_credentials(lines: list[str]) -> list[RuleMatch]:
                 # non-ASCII chars → i18n label; single lowercase word → status indicator
                 if cred_value and (_is_non_ascii(cred_value) or cred_value.lower() in _STATUS_WORDS):
                     break
+                # Fix 1: UI label suppression. A multi-word plain-English value
+                # (e.g. "Verify password") is UI copy, not a secret, regardless of
+                # the key name. A single-word value only suppresses if the key
+                # name itself signals UI copy (label/text/title/button/etc.) —
+                # this avoids suppressing real single-word secrets like "supersecret".
+                if cred_value and _looks_like_plain_english_label(cred_value):
+                    key_part = line.split(':', 1)[0] if ':' in line else line.split('=', 1)[0]
+                    if ' ' in cred_value or _UI_LABEL_KEY_HINTS.search(key_part):
+                        break
                 # Suppress if the value is a bcrypt hash — already-hashed passwords
                 # in seeders/fixtures are not plaintext secrets.
                 if cred_value and _BCRYPT_HASH.match(cred_value):
@@ -434,10 +485,66 @@ _WEAK_RANDOM_PATTERNS = [
     (r'\brandom\.sample\(', "random.sample()"),
 ]
 
-_WEAK_RANDOM_SECURITY_CONTEXT = re.compile(
-    r'(?i)(token|secret|password|session|nonce|otp|pin|csrf|api_key|auth_key|salt|uuid|'
-    r'reset_code|verify_code|access_token|refresh_token)',
+# Fix 3: R001 security-context gate, rewritten to check the *receiving variable
+# name* rather than scanning a loose multi-line window for security keywords.
+# The old window-based check over-fired: "pin" matched inside "pinned_apps_names"/
+# "pin_count" (UI icon-pinning code) and "session" matched inside "sessionDuration"
+# (a workout session length, not an auth session) — the keyword happened to
+# appear nearby as a substring even though the call site has nothing to do with
+# security. Gating on the assignment target itself eliminates that class of FP.
+_R001_FIRE_WORDS = frozenset({
+    'token', 'secret', 'password', 'otp', 'code',
+    'session', 'auth', 'nonce', 'salt', 'hash',
+})
+
+# "key" and "id" alone are too overloaded to fire on bare presence — React
+# component keys (componentKey, refreshKey), array/map keys, and analytics/
+# tracking IDs (visitorId, anonymousId, formId) are extremely common and not
+# security-sensitive. They only count when paired with a qualifying word.
+_R001_ID_KEY_QUALIFIERS = frozenset({
+    'api', 'auth', 'secret', 'private', 'session',
+    'signing', 'encryption', 'access', 'jwt', 'csrf', 'request',
+})
+
+# A fire-word can appear in an otherwise non-security compound, e.g.
+# "sessionDuration" (workout session length) vs "sessionId" (auth session).
+# If a measurement/quantity word is also present, it's a length/count/time
+# value, not an identifier or secret — override to suppress regardless of
+# which fire-word matched.
+_R001_QUANTITY_OVERRIDE = frozenset({
+    'duration', 'length', 'time', 'count', 'index', 'hours', 'minutes',
+    'seconds', 'days', 'weeks', 'months', 'amount', 'size', 'limit',
+    'max', 'min', 'rate', 'percent', 'percentage',
+})
+
+# Matches the variable/property name immediately receiving the random() call:
+#   const sessionId = ...   /   let token = ...   /   password = ...
+#   clientId: Math.random()...   (object-literal property)
+_R001_ASSIGN_TARGET = re.compile(
+    r'^\s*(?:export\s+)?(?:const|let|var)?\s*([A-Za-z_]\w*)\s*[:=]\s*(?!=)'
 )
+
+
+def _split_identifier_words(name: str) -> list[str]:
+    """Split camelCase/PascalCase/snake_case into lowercase sub-words, so
+    'sessionId' -> ['session', 'id'] and 'pin_count' -> ['pin', 'count']."""
+    spaced = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', ' ', name)
+    spaced = spaced.replace('_', ' ').replace('-', ' ')
+    return [w.lower() for w in spaced.split() if w]
+
+
+def _is_security_sensitive_target(name: str) -> bool:
+    """True only if `name` (a variable or object-literal property) contains a
+    security-sensitive word. Default is False — R001 should not fire just
+    because an unrelated security word happens to appear somewhere nearby."""
+    words = _split_identifier_words(name)
+    if any(w in _R001_QUANTITY_OVERRIDE for w in words):
+        return False  # measurement/quantity, not an identifier or secret
+    if any(w in _R001_FIRE_WORDS for w in words):
+        return True
+    if ('key' in words or 'id' in words) and any(w in _R001_ID_KEY_QUALIFIERS for w in words):
+        return True
+    return False
 
 # NOTE: do NOT add bare "sample" here — it collides with random.sample() the function.
 # "sample" would silently skip `password = random.sample(chars, 12)` which is a real finding.
@@ -495,7 +602,7 @@ def check_weak_randomness(lines: list[str], language: str) -> list[RuleMatch]:
                 if _USESTATE_RANDOM.search(line):
                     var_match = _USESTATE_VAR.search(line)
                     var_name = var_match.group(1) if var_match else ''
-                    if not _WEAK_RANDOM_SECURITY_CONTEXT.search(var_name):
+                    if not _is_security_sensitive_target(var_name):
                         continue  # suppress — React key, not a secret
 
                 # Exclusion: crypto API availability guard — Math.random() used only
@@ -506,7 +613,11 @@ def check_weak_randomness(lines: list[str], language: str) -> list[RuleMatch]:
                 if any(p.search(window) for p in _CRYPTO_FALLBACK_PATTERNS):
                     continue
 
-                if not _WEAK_RANDOM_SECURITY_CONTEXT.search(window):
+                # Fix 3: gate on the variable/property actually receiving the
+                # random() output, not on loose keyword presence in the window.
+                target_match = _R001_ASSIGN_TARGET.search(line)
+                target_name = target_match.group(1) if target_match else ''
+                if not _is_security_sensitive_target(target_name):
                     continue
 
                 fix_js = "Use crypto.randomBytes(32).toString('hex') or crypto.randomUUID()"
@@ -977,6 +1088,11 @@ _EVAL_IN_STRING = re.compile(
     r'''|["][^"]*\beval\s*\([^"]*["]''',
 )
 
+# Fix 2a: Playwright's page.$$eval()/$eval() — a DOM query API, unrelated to JS eval().
+# The bare-eval pattern's word boundary still matches "eval(" inside "$$eval(" since
+# "$" is a non-word character, so this needs an explicit exclusion.
+_PLAYWRIGHT_EVAL = re.compile(r'\$\$?eval\s*\(')
+
 # Shell-wrapper function definition pattern: the window contains a function whose
 # *name* is a shell/exec trigger word. Used to suppress I002/I003 when the code is
 # defining an exec abstraction (e.g. export function exec(command)), not invoking
@@ -985,6 +1101,28 @@ _SHELL_WRAPPER_FN_RE = re.compile(
     r'(?:function|const|let|var|export\s+(?:async\s+)?function|export\s+const)\s+'
     r'(exec|spawn|shell|system|run_command|run_cmd|exec_cmd|execute|sh)\s*[\s(=]',
     re.IGNORECASE,
+)
+
+# Fix 2b: Python `def exec(...)`/`def eval(...)` shadows the builtin name. Unlike
+# `def run_cmd(...)` (a descriptive name a developer chose, giving no signal about
+# safety), a function literally named `exec`/`eval` is almost always self-recursive
+# or otherwise unrelated to the dangerous builtin — e.g. AlphaFold3's
+# `def exec(b, a): return exec(blocks[s:e], a)` is plain recursion, not code
+# execution. Scoped to just these two builtin names so real vulnerable functions
+# with descriptive names (run_cmd, execute, shell) are still caught.
+_PYTHON_BUILTIN_SHADOW_RE = re.compile(
+    r'\bdef\s+(exec|eval)\s*\(',
+)
+
+
+def _shadows_python_builtin(window: str) -> bool:
+    return bool(_PYTHON_BUILTIN_SHADOW_RE.search(window))
+
+# Fix 2c: importlib.import_module("literal.module.path") — a hardcoded string
+# argument can never be attacker-controlled, unlike importlib.import_module(module_path)
+# where the argument is a variable that might (even if rarely) carry tainted input.
+_IMPORTLIB_LITERAL_ARG = re.compile(
+    r'importlib\.import_module\s*\(\s*["\'][^"\']*["\']\s*\)'
 )
 
 
@@ -1122,12 +1260,29 @@ def check_injection(lines: list[str], language: str) -> list[RuleMatch]:
                 # Suppress: eval() appears inside a string literal (error message, not a call)
                 if _EVAL_IN_STRING.search(line):
                     break
+                # Fix 2a: Playwright's $eval()/$$eval() DOM query API, not JS eval()
+                if _PLAYWRIGHT_EVAL.search(line):
+                    break
+                # Fix 2c: importlib.import_module() with a hardcoded string literal —
+                # cannot be attacker-controlled, unlike a variable argument.
+                if _IMPORTLIB_LITERAL_ARG.search(line):
+                    break
                 window_start = max(0, i - 5)
                 window_end = min(len(lines), i + 5)
                 window = '\n'.join(lines[window_start:window_end])
                 if _has_taint(window):
                     # Suppress: the enclosing function IS the shell/eval abstraction being defined
                     if _inside_shell_wrapper(window):
+                        break
+                    # Fix 2b: Python function literally named exec/eval — self-recursive
+                    # or otherwise unrelated to the builtin, not a real eval/exec call.
+                    # Uses a wider backward-only window than the taint check: nested
+                    # function definitions (a helper defined inside the shadowing
+                    # function) can put the actual call well outside a +/-5 window —
+                    # e.g. AlphaFold3's checkpointing.py nests `exec_sliced` 7+ lines
+                    # inside `def exec(b, a):`.
+                    shadow_window = '\n'.join(lines[max(0, i - 20):i + 3])
+                    if _shadows_python_builtin(shadow_window):
                         break
                     findings.append(_match(
                         rule_id="PRBL-I003",
@@ -2326,6 +2481,15 @@ def run_all_rules(code: str, language: str, file_path: str = "") -> list[RuleMat
     # Skip vendored/upstream source trees entirely — third-party code is not
     # the developer's responsibility and generates high noise volumes.
     if _is_vendor_file(file_path):
+        return []
+
+    # Skip Prbl's own rewriter prompt-template module entirely. This file's sole
+    # purpose is to hold "Before:"/"After:" vulnerability examples for every rule
+    # (TLS verification disabled, JWT decode without verify, hardcoded secrets,
+    # SQL injection, etc.) so the AI rewriter knows what each fix looks like. It
+    # is documentation-as-prompt-text, not application code — every line will
+    # superficially match the exact patterns these rules look for, by design.
+    if file_path and Path(file_path.replace('\\', '/')).as_posix().endswith("rewriter/prompt.py"):
         return []
 
     lines = code.splitlines()
