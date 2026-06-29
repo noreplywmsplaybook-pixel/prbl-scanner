@@ -3,7 +3,7 @@
 # static analysis and package registry lookups — no external HTTP library needed.
 # The packages below are required only if you use the optional CLI or API server.
 
-fastapi>=0.100.0
+fastapi>=0.138.2
 uvicorn>=0.22.0
 requests>=2.33.0
 urllib3>=2.7.0
