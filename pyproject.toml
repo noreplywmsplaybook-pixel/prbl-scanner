@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prbl-scanner"
-version = "0.1.0"
-description = "AI code security scanner — finds what AI coding tools miss"
+version = "0.1.1"
+description = "AI code security scanner: finds the hardcoded keys, missing auth checks and injection that AI coding tools ship"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -29,7 +29,9 @@ dependencies = [
 prbl-scanner = "prbl.cli:main"
 
 [project.urls]
-Homepage = "https://prbl-landing.vercel.app"
+Homepage = "https://getprbl.com"
+Documentation = "https://getprbl.com/sast"
+"Free scan" = "https://getprbl.com/scan"
 Repository = "https://github.com/noreplywmsplaybook-pixel/prbl-scanner"
 "Bug Tracker" = "https://github.com/noreplywmsplaybook-pixel/prbl-scanner/issues"
 Security = "https://github.com/noreplywmsplaybook-pixel/prbl-scanner/blob/main/SECURITY.md"
